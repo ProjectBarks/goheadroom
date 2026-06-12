@@ -1,0 +1,21 @@
+[[recommendations]]
+id = "json_array"
+content_type = "JsonArray"
+title = "JSON Array Detected"
+description = "Content appears to be a JSON array of objects."
+suggestion = "Consider using structured extraction instead of summarization."
+
+[[recommendations]]
+id = "large_diff"
+content_type = "GitDiff"
+title = "Large Diff"
+description = "This diff is very large."
+suggestion = "Consider splitting into smaller diffs."
+min_size = 5000
+
+[[recommendations]]
+id = "source_code"
+content_type = "SourceCode"
+title = "Source Code"
+description = "Content is source code."
+suggestion = "Use code-aware summarization."
