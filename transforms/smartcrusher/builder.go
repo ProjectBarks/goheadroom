@@ -1,6 +1,9 @@
 package smartcrusher
 
-import "github.com/uber/goheadroom/transforms/anchorselector"
+import (
+	"github.com/uber/goheadroom/transforms/anchorselector"
+	"github.com/uber/goheadroom/transforms/smartcrusher/compaction"
+)
 
 // SmartCrusherBuilder provides fluent API for building SmartCrusher.
 type SmartCrusherBuilder struct {
@@ -47,5 +50,6 @@ func (b *SmartCrusherBuilder) Build() *SmartCrusher {
 		Analyzer:       NewSmartAnalyzer(b.config),
 		Constraints:    b.constraints,
 		Observers:      b.observers,
+		Compaction:     compaction.NewDefaultCompactionStage(),
 	}
 }

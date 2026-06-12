@@ -9,6 +9,7 @@ import (
 
 	"github.com/uber/goheadroom/transforms/adaptivesizer"
 	"github.com/uber/goheadroom/transforms/anchorselector"
+	"github.com/uber/goheadroom/transforms/smartcrusher/compaction"
 )
 
 // CrushArrayResult is the return type for CrushArray.
@@ -28,6 +29,7 @@ type SmartCrusher struct {
 	Analyzer       *SmartAnalyzer
 	Constraints    []Constraint
 	Observers      []Observer
+	Compaction     *compaction.CompactionStage
 }
 
 // Crush compresses JSON content. Returns a CrushResult.
@@ -198,6 +200,35 @@ func (sc *SmartCrusher) CrushArray(items []json.RawMessage, queryContext string,
 	itemStrings := make([]string, len(items))
 	for i, raw := range items {
 		itemStrings[i] = string(raw)
+	}
+
+	// Lossless-first: try tabular compaction before lossy selection.
+	if sc.Compaction != nil && len(items) >= sc.Config.MinItemsToAnalyze {
+		parsed := make([]interface{}, len(items))
+		for i, raw := range items {
+			var v interface{}
+			json.Unmarshal(raw, &v)
+			parsed[i] = v
+		}
+		c, rendered := sc.Compaction.Run(parsed)
+		if c.WasCompacted() {
+			inputBytes := estimateArrayBytes(itemStrings)
+			savingsRatio := 0.0
+			if inputBytes > 0 {
+				savingsRatio = 1.0 - float64(len(rendered))/float64(inputBytes)
+			}
+			if savingsRatio >= sc.Config.LosslessMinSavingsRatio {
+				kind := compactionKindStr(c)
+				result := make([]json.RawMessage, len(items))
+				copy(result, items)
+				return CrushArrayResult{
+					Items:        result,
+					StrategyInfo: fmt.Sprintf("lossless:%s", kind),
+					Compacted:    &rendered,
+					CompactionKind: &kind,
+				}
+			}
+		}
 	}
 
 	var maxK *int
@@ -464,5 +495,29 @@ func groupKey(item json.RawMessage) string {
 			return "number"
 		}
 		return "other"
+	}
+}
+
+func estimateArrayBytes(itemStrings []string) int {
+	total := 2 // [ and ]
+	for i, s := range itemStrings {
+		if i > 0 {
+			total += 2 // ", "
+		}
+		total += len(s)
+	}
+	return total
+}
+
+func compactionKindStr(c *compaction.Compaction) string {
+	switch c.Kind {
+	case compaction.CompactionTable:
+		return "csv_schema"
+	case compaction.CompactionBuckets:
+		return "buckets"
+	case compaction.CompactionOpaqueRef:
+		return "opaque_ref"
+	default:
+		return "unknown"
 	}
 }
