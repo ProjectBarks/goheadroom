@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -360,27 +361,35 @@ func (f *CSVSchemaFormatter) formatTable(schema *Schema, rows []Row, originalCou
 			if i > 0 {
 				buf.WriteString(",")
 			}
-			buf.WriteString(formatCellCSV(cell))
+			typeTag := ""
+			if i < len(schema.Fields) {
+				typeTag = schema.Fields[i].TypeTag
+			}
+			buf.WriteString(formatCellCSV(cell, typeTag))
 		}
 		buf.WriteString("\n")
 	}
-	return strings.TrimRight(buf.String(), "\n")
+	return buf.String()
 }
 
 func (f *CSVSchemaFormatter) FormatRow(schema *Schema, row *Row) string {
 	var parts []string
-	for _, cell := range row.Cells {
-		parts = append(parts, formatCellCSV(cell))
+	for i, cell := range row.Cells {
+		typeTag := ""
+		if i < len(schema.Fields) {
+			typeTag = schema.Fields[i].TypeTag
+		}
+		parts = append(parts, formatCellCSV(cell, typeTag))
 	}
 	return strings.Join(parts, ",")
 }
 
-func formatCellCSV(cell CellValue) string {
+func formatCellCSV(cell CellValue, typeTag string) string {
 	switch cell.Kind {
 	case KindMissing:
 		return ""
 	case KindScalar:
-		return formatScalarCSV(cell.Scalar)
+		return formatScalarCSV(cell.Scalar, typeTag)
 	case KindNested:
 		f := &CSVSchemaFormatter{}
 		return f.FormatCompaction(cell.Nested)
@@ -391,7 +400,7 @@ func formatCellCSV(cell CellValue) string {
 	}
 }
 
-func formatScalarCSV(v interface{}) string {
+func formatScalarCSV(v interface{}, typeTag string) string {
 	if v == nil {
 		return ""
 	}
@@ -402,10 +411,14 @@ func formatScalarCSV(v interface{}) string {
 		}
 		return val
 	case float64:
-		if val == float64(int64(val)) {
+		if typeTag == "int" && val == float64(int64(val)) {
 			return fmt.Sprintf("%d", int64(val))
 		}
-		return fmt.Sprintf("%g", val)
+		s := strconv.FormatFloat(val, 'f', -1, 64)
+		if !strings.Contains(s, ".") {
+			s += ".0"
+		}
+		return s
 	case bool:
 		if val {
 			return "true"
@@ -467,7 +480,7 @@ func (f *MarkdownKVFormatter) FormatRow(schema *Schema, row *Row) string {
 	var lines []string
 	for i, field := range schema.Fields {
 		if i < len(row.Cells) {
-			lines = append(lines, fmt.Sprintf("- **%s**: %s", field.Name, formatCellCSV(row.Cells[i])))
+			lines = append(lines, fmt.Sprintf("- **%s**: %s", field.Name, formatCellCSV(row.Cells[i], field.TypeTag)))
 		}
 	}
 	return strings.Join(lines, "\n")
