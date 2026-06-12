@@ -213,17 +213,16 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 		if ratio >= lc.config.MinCompressionRatioForCCR {
 			reason := "compression ratio too high"
 			stats.CCRSkipReason = &reason
-		} else if store != nil {
+		} else {
 			key := md5Hex24(content)
 			marker := fmt.Sprintf("\n[%d lines compressed to %d. Retrieve more: hash=%s]",
 				originalLineCount, len(selected), key)
 			compressed += marker
-			store.Put(key, []byte(content))
+			if store != nil {
+				store.Put(key, []byte(content))
+			}
 			cacheKey = &key
 			stats.CCREmitted = true
-		} else {
-			reason := "no store provided"
-			stats.CCRSkipReason = &reason
 		}
 	} else {
 		reason := "ccr disabled in config"
