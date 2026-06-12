@@ -6,6 +6,29 @@ import (
 	"github.com/uber/goheadroom/authmode"
 )
 
+// Mode controls whether live-zone compression is attempted at all.
+// The proxy sets this from the request-level or global config.
+type Mode int
+
+const (
+	// Auto enables compression with provider-appropriate defaults.
+	Auto Mode = iota
+	// Off disables compression entirely; the body passes through unchanged.
+	Off
+)
+
+// String returns a stable string tag for the mode.
+func (m Mode) String() string {
+	switch m {
+	case Auto:
+		return "auto"
+	case Off:
+		return "off"
+	default:
+		return "unknown"
+	}
+}
+
 const (
 	VolatileTokenThresholdPayg         uint32  = 128
 	VolatileTokenThresholdSubscription uint32  = 32
