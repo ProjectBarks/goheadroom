@@ -1,5 +1,7 @@
 package smartcrusher
 
+import "github.com/uber/goheadroom/transforms/anchorselector"
+
 // SmartCrusherBuilder provides fluent API for building SmartCrusher.
 type SmartCrusherBuilder struct {
 	config      SmartCrusherConfig
@@ -32,7 +34,7 @@ func (b *SmartCrusherBuilder) AddObserver(o Observer) *SmartCrusherBuilder {
 	return b
 }
 
-// WithDefaultOSSSetup applies default scorer, constraints, and observer.
+// WithDefaultOSSSetup applies default constraints and observer.
 func (b *SmartCrusherBuilder) WithDefaultOSSSetup() *SmartCrusherBuilder {
 	return b.AddDefaultOSSConstraints().AddObserver(TracingObserver{})
 }
@@ -40,9 +42,10 @@ func (b *SmartCrusherBuilder) WithDefaultOSSSetup() *SmartCrusherBuilder {
 // Build constructs the SmartCrusher.
 func (b *SmartCrusherBuilder) Build() *SmartCrusher {
 	return &SmartCrusher{
-		Config:      b.config,
-		Analyzer:    NewSmartAnalyzer(b.config),
-		Constraints: b.constraints,
-		Observers:   b.observers,
+		Config:         b.config,
+		AnchorSelector: anchorselector.NewAnchorSelector(anchorselector.DefaultAnchorConfig()),
+		Analyzer:       NewSmartAnalyzer(b.config),
+		Constraints:    b.constraints,
+		Observers:      b.observers,
 	}
 }
