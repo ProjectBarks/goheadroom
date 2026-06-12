@@ -1,0 +1,865 @@
+// Package logcompressor compresses build and test output (pytest, npm,
+// cargo, jest, make, generic) by detecting format, classifying lines,
+// scoring, selecting important lines, and deduplicating.
+//
+// Port of headroom-core/src/transforms/log_compressor.rs.
+package logcompressor
+
+import (
+	"crypto/md5"
+	"fmt"
+	"regexp"
+	"sort"
+	"strings"
+	"unicode"
+
+	"github.com/uber/goheadroom/ccr"
+	"github.com/uber/goheadroom/transforms/adaptivesizer"
+)
+
+// ── Log format enum ─────────────────────────────────────────────────
+
+// LogFormat represents the detected build/test log format.
+type LogFormat int
+
+const (
+	LogFormatPytest  LogFormat = iota
+	LogFormatNpm     LogFormat = iota
+	LogFormatCargo   LogFormat = iota
+	LogFormatJest    LogFormat = iota
+	LogFormatMake    LogFormat = iota
+	LogFormatGeneric LogFormat = iota
+)
+
+func (f LogFormat) String() string {
+	switch f {
+	case LogFormatPytest:
+		return "pytest"
+	case LogFormatNpm:
+		return "npm"
+	case LogFormatCargo:
+		return "cargo"
+	case LogFormatJest:
+		return "jest"
+	case LogFormatMake:
+		return "make"
+	default:
+		return "generic"
+	}
+}
+
+// ── Log level enum ──────────────────────────────────────────────────
+
+// LogLevel represents per-line log severity.
+type LogLevel int
+
+const (
+	LogLevelTrace   LogLevel = iota // 0 (lowest)
+	LogLevelDebug   LogLevel = iota // 1
+	LogLevelInfo    LogLevel = iota // 2
+	LogLevelUnknown LogLevel = iota // 3
+	LogLevelWarn    LogLevel = iota // 4
+	LogLevelFail    LogLevel = iota // 5
+	LogLevelError   LogLevel = iota // 6 (highest)
+)
+
+func (l LogLevel) String() string {
+	switch l {
+	case LogLevelError:
+		return "error"
+	case LogLevelFail:
+		return "fail"
+	case LogLevelWarn:
+		return "warn"
+	case LogLevelInfo:
+		return "info"
+	case LogLevelDebug:
+		return "debug"
+	case LogLevelTrace:
+		return "trace"
+	default:
+		return "unknown"
+	}
+}
+
+// ── Log line ────────────────────────────────────────────────────────
+
+// LogLine is one classified log line.
+type LogLine struct {
+	LineNumber   int
+	Content      string
+	Level        LogLevel
+	IsStackTrace bool
+	IsSummary    bool
+	Score        float32
+}
+
+// ── Config ──────────────────────────────────────────────────────────
+
+// LogCompressorConfig mirrors Rust LogCompressorConfig.
+type LogCompressorConfig struct {
+	MaxErrors               int
+	ErrorContextLines       int
+	KeepFirstError          bool
+	KeepLastError           bool
+	MaxStackTraces          int
+	StackTraceMaxLines      int
+	MaxWarnings             int
+	DedupeWarnings          bool
+	KeepSummaryLines        bool
+	MaxTotalLines           int
+	EnableCCR               bool
+	MinLinesForCCR          int
+	MinCompressionRatioForCCR float64
+}
+
+// DefaultConfig returns defaults matching Rust/Python.
+func DefaultConfig() LogCompressorConfig {
+	return LogCompressorConfig{
+		MaxErrors:               10,
+		ErrorContextLines:       3,
+		KeepFirstError:          true,
+		KeepLastError:           true,
+		MaxStackTraces:          3,
+		StackTraceMaxLines:      20,
+		MaxWarnings:             5,
+		DedupeWarnings:          true,
+		KeepSummaryLines:        true,
+		MaxTotalLines:           100,
+		EnableCCR:               true,
+		MinLinesForCCR:          50,
+		MinCompressionRatioForCCR: 0.5,
+	}
+}
+
+// ── Result types ────────────────────────────────────────────────────
+
+// LogCompressionResult is the parity-equal result.
+type LogCompressionResult struct {
+	Compressed          string
+	Original            string
+	OriginalLineCount   int
+	CompressedLineCount int
+	FormatDetected      LogFormat
+	CompressionRatio    float64
+	CacheKey            *string
+	Stats               map[string]int64
+}
+
+// LogCompressorStats carries sidecar diagnostics.
+type LogCompressorStats struct {
+	Format                   *LogFormat
+	StackTracesSeen          int
+	StackTracesKept          int
+	WarningsDroppedByDedupe  int
+	LinesDroppedByGlobalCap  int
+	CCREmitted               bool
+	CCRSkipReason            *string
+}
+
+// ── Compressor ──────────────────────────────────────────────────────
+
+// LogCompressor compresses build/test log output.
+type LogCompressor struct {
+	config LogCompressorConfig
+}
+
+// New creates a LogCompressor with the given config.
+func New(config LogCompressorConfig) *LogCompressor {
+	return &LogCompressor{config: config}
+}
+
+// Compress compresses content.
+func (lc *LogCompressor) Compress(content string, bias float64) (LogCompressionResult, LogCompressorStats) {
+	return lc.CompressWithStore(content, bias, nil)
+}
+
+// CompressWithStore compresses with optional CCR persistence.
+func (lc *LogCompressor) CompressWithStore(content string, bias float64, store ccr.CcrStore) (LogCompressionResult, LogCompressorStats) {
+	var stats LogCompressorStats
+	lines := strings.Split(content, "\n")
+	originalLineCount := len(lines)
+
+	if originalLineCount < lc.config.MinLinesForCCR {
+		return LogCompressionResult{
+			Compressed:          content,
+			Original:            content,
+			OriginalLineCount:   originalLineCount,
+			CompressedLineCount: originalLineCount,
+			FormatDetected:      LogFormatGeneric,
+			CompressionRatio:    1.0,
+			Stats:               make(map[string]int64),
+		}, stats
+	}
+
+	format := detectFormat(lines)
+	stats.Format = &format
+
+	logLines := lc.parseLines(lines)
+	selected := lc.selectLines(logLines, bias, &stats)
+	compressedBody, outputStats := lc.formatOutput(selected, logLines)
+	compressed := compressedBody
+
+	var maxLen int
+	if len(content) > 0 {
+		maxLen = len(content)
+	} else {
+		maxLen = 1
+	}
+	ratio := float64(len(compressed)) / float64(maxLen)
+
+	var cacheKey *string
+	if lc.config.EnableCCR {
+		if ratio >= lc.config.MinCompressionRatioForCCR {
+			reason := "compression ratio too high"
+			stats.CCRSkipReason = &reason
+		} else if store != nil {
+			key := md5Hex24(content)
+			marker := fmt.Sprintf("\n[%d lines compressed to %d. Retrieve more: hash=%s]",
+				originalLineCount, len(selected), key)
+			compressed += marker
+			store.Put(key, []byte(content))
+			cacheKey = &key
+			stats.CCREmitted = true
+		} else {
+			reason := "no store provided"
+			stats.CCRSkipReason = &reason
+		}
+	} else {
+		reason := "ccr disabled in config"
+		stats.CCRSkipReason = &reason
+	}
+
+	result := LogCompressionResult{
+		Compressed:          compressed,
+		Original:            content,
+		OriginalLineCount:   originalLineCount,
+		CompressedLineCount: len(selected),
+		FormatDetected:      format,
+		CompressionRatio:    ratio,
+		CacheKey:            cacheKey,
+		Stats:               outputStats,
+	}
+	return result, stats
+}
+
+// ── Format detection ────────────────────────────────────────────────
+
+var formatPatterns = []struct {
+	format   LogFormat
+	patterns []string
+}{
+	{LogFormatPytest, []string{
+		"=== FAILURES", "=== ERRORS", "=== test session",
+		"=== short test summary", "PASSED [", "FAILED [",
+		"ERROR [", "SKIPPED [", "collected ",
+	}},
+	{LogFormatNpm, []string{"npm ERR!", "npm WARN", "npm info", "npm http"}},
+	{LogFormatCargo, []string{"Compiling ", "Finished ", "Running ", "warning: ", "error[E"}},
+	{LogFormatJest, []string{"PASS ", "FAIL ", "Test Suites:"}},
+	{LogFormatMake, []string{"make[", "make:", "gcc ", "g++ ", "clang "}},
+}
+
+func detectFormat(lines []string) LogFormat {
+	sample := lines
+	if len(sample) > 100 {
+		sample = sample[:100]
+	}
+	var bestFormat LogFormat
+	bestScore := 0
+	for _, fp := range formatPatterns {
+		score := 0
+		for _, line := range sample {
+			for _, pat := range fp.patterns {
+				if strings.Contains(line, pat) {
+					score++
+					break
+				}
+			}
+		}
+		if score > 0 && score > bestScore {
+			bestScore = score
+			bestFormat = fp.format
+		}
+	}
+	if bestScore == 0 {
+		return LogFormatGeneric
+	}
+	return bestFormat
+}
+
+// DetectFormat is exported for testing.
+func DetectFormat(lines []string) LogFormat {
+	return detectFormat(lines)
+}
+
+// ── Level classification ────────────────────────────────────────────
+
+var levelPatterns = []struct {
+	level    LogLevel
+	patterns []string
+}{
+	{LogLevelError, []string{"ERROR", "error", "Error", "FATAL", "fatal", "Fatal", "CRITICAL", "critical"}},
+	{LogLevelFail, []string{"FAIL", "FAILED", "fail", "failed", "Fail", "Failed"}},
+	{LogLevelWarn, []string{"WARN", "WARNING", "warn", "warning", "Warn", "Warning"}},
+	{LogLevelInfo, []string{"INFO", "info", "Info"}},
+	{LogLevelDebug, []string{"DEBUG", "debug", "Debug"}},
+	{LogLevelTrace, []string{"TRACE", "trace", "Trace"}},
+}
+
+func classifyLevel(line string) LogLevel {
+	for _, lp := range levelPatterns {
+		for _, pat := range lp.patterns {
+			idx := strings.Index(line, pat)
+			if idx < 0 {
+				continue
+			}
+			// Word boundary check.
+			if isWordBoundary(line, idx, idx+len(pat)) {
+				return lp.level
+			}
+		}
+	}
+	return LogLevelUnknown
+}
+
+func isWordBoundary(s string, start, end int) bool {
+	leftOK := start == 0 || !isWordByte(s[start-1])
+	rightOK := end == len(s) || !isWordByte(s[end])
+	return leftOK && rightOK
+}
+
+func isWordByte(b byte) bool {
+	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_'
+}
+
+// ── Stack trace detection ───────────────────────────────────────────
+
+type traceFlavor int
+
+const (
+	traceFlavorPython traceFlavor = iota
+	traceFlavorJS
+	traceFlavorJava
+	traceFlavorRust
+	traceFlavorGo
+)
+
+func detectTraceFlavor(line string) (traceFlavor, bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	if strings.HasPrefix(trimmed, "Traceback (most recent call last)") || isPythonFileFrame(trimmed) {
+		return traceFlavorPython, true
+	}
+	if isJSAtFrame(trimmed) {
+		return traceFlavorJS, true
+	}
+	if isJavaAtFrame(trimmed) {
+		return traceFlavorJava, true
+	}
+	if strings.HasPrefix(trimmed, "--> ") && hasLineColSuffix(trimmed) {
+		return traceFlavorRust, true
+	}
+	if isGoFrame(line) {
+		return traceFlavorGo, true
+	}
+	return 0, false
+}
+
+func isPythonFileFrame(s string) bool {
+	return strings.HasPrefix(s, `File "`) && strings.Contains(s, `", line `) &&
+		len(s) > 0 && s[len(s)-1] >= '0' && s[len(s)-1] <= '9'
+}
+
+func isJSAtFrame(s string) bool {
+	return strings.HasPrefix(s, "at ") && strings.Contains(s, "(") &&
+		strings.Contains(s, ")") && hasLineColSuffix(s)
+}
+
+func isJavaAtFrame(s string) bool {
+	if !strings.HasPrefix(s, "at ") || !strings.Contains(s, "(") {
+		return false
+	}
+	parenIdx := strings.Index(s, "(")
+	body := s[3:parenIdx]
+	if body == "" {
+		return false
+	}
+	for _, c := range body {
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '$') {
+			return false
+		}
+	}
+	return true
+}
+
+func hasLineColSuffix(s string) bool {
+	bytes := []byte(s)
+	for i := 0; i < len(bytes)-2; i++ {
+		if bytes[i] == ':' && bytes[i+1] >= '0' && bytes[i+1] <= '9' {
+			j := i + 1
+			for j < len(bytes) && bytes[j] >= '0' && bytes[j] <= '9' {
+				j++
+			}
+			if j < len(bytes) && bytes[j] == ':' && j+1 < len(bytes) && bytes[j+1] >= '0' && bytes[j+1] <= '9' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isGoFrame(s string) bool {
+	trimmed := strings.TrimLeft(s, " \t")
+	sawDigit := false
+	i := 0
+	for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+		sawDigit = true
+		i++
+	}
+	if !sawDigit || i >= len(trimmed) || trimmed[i] != ':' {
+		return false
+	}
+	i++
+	for i < len(trimmed) && trimmed[i] == ' ' {
+		i++
+	}
+	rest := trimmed[i:]
+	if !strings.HasPrefix(rest, "0x") {
+		return false
+	}
+	hexPart := rest[2:]
+	count := 0
+	for _, c := range hexPart {
+		if (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') {
+			count++
+		} else {
+			break
+		}
+	}
+	return count > 0
+}
+
+func traceTerminates(flavor traceFlavor, line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	switch flavor {
+	case traceFlavorPython:
+		isIndentedOrBlank := strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") || line == ""
+		isContinuation := strings.HasPrefix(trimmed, "Traceback") ||
+			strings.HasPrefix(trimmed, "File ") ||
+			strings.HasPrefix(trimmed, "During handling") ||
+			strings.HasPrefix(trimmed, "The above exception")
+		if isIndentedOrBlank || isContinuation {
+			return false
+		}
+		// Terminate unless starts with uppercase (exception type line).
+		if len(trimmed) > 0 {
+			return !unicode.IsUpper(rune(trimmed[0]))
+		}
+		return true
+	case traceFlavorJS, traceFlavorJava:
+		return !strings.HasPrefix(trimmed, "at ") && line != ""
+	case traceFlavorRust:
+		return !strings.HasPrefix(trimmed, "--> ") && line != ""
+	case traceFlavorGo:
+		if line == "" {
+			return false
+		}
+		if len(trimmed) > 0 && trimmed[0] >= '0' && trimmed[0] <= '9' {
+			return false
+		}
+		return true
+	}
+	return true
+}
+
+// ── Summary detection ───────────────────────────────────────────────
+
+func isSummaryLine(line string) bool {
+	if strings.HasPrefix(line, "===") || strings.HasPrefix(line, "---") {
+		return true
+	}
+	// Digit-prefixed summary.
+	leadingDigits := 0
+	for _, b := range line {
+		if b >= '0' && b <= '9' {
+			leadingDigits++
+		} else {
+			break
+		}
+	}
+	if leadingDigits > 0 && leadingDigits < len(line) && line[leadingDigits] == ' ' {
+		rest := line[leadingDigits+1:]
+		for _, kw := range []string{"passed", "failed", "skipped", "error", "warning"} {
+			if strings.HasPrefix(rest, kw) {
+				return true
+			}
+		}
+	}
+	// Test/Suite prefix.
+	for _, prefix := range []string{"Test ", "Tests ", "Tests:", "Test:", "Suite ", "Suites ", "Suites:", "Suite:"} {
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			for _, c := range rest {
+				if c == ' ' || c == '\t' {
+					continue
+				}
+				return c >= '0' && c <= '9'
+			}
+		}
+	}
+	for _, prefix := range []string{"TOTAL", "Total", "Summary"} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	for _, prefix := range []string{"Build", "Compile", "Test"} {
+		if strings.HasPrefix(line, prefix) {
+			for _, outcome := range []string{"succeeded", "failed", "complete"} {
+				if strings.Contains(line, outcome) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ── Scoring ─────────────────────────────────────────────────────────
+
+func scoreLogLine(line *LogLine) float32 {
+	var levelScore float32
+	switch line.Level {
+	case LogLevelError, LogLevelFail:
+		levelScore = 1.0
+	case LogLevelWarn:
+		levelScore = 0.5
+	case LogLevelInfo, LogLevelUnknown:
+		levelScore = 0.1
+	case LogLevelDebug:
+		levelScore = 0.05
+	case LogLevelTrace:
+		levelScore = 0.02
+	}
+	var stackBoost float32
+	if line.IsStackTrace {
+		stackBoost = 0.3
+	}
+	var summaryBoost float32
+	if line.IsSummary {
+		summaryBoost = 0.4
+	}
+	total := levelScore + stackBoost + summaryBoost
+	if total > 1.0 {
+		total = 1.0
+	}
+	return total
+}
+
+// ── Parse lines ─────────────────────────────────────────────────────
+
+func (lc *LogCompressor) parseLines(lines []string) []LogLine {
+	out := make([]LogLine, 0, len(lines))
+	var activeFlavor *traceFlavor
+	traceLines := 0
+
+	for i, line := range lines {
+		entry := LogLine{
+			LineNumber: i,
+			Content:    line,
+			Level:      classifyLevel(line),
+			IsSummary:  isSummaryLine(line),
+		}
+
+		if activeFlavor != nil {
+			if traceLines >= lc.config.StackTraceMaxLines || traceTerminates(*activeFlavor, line) {
+				activeFlavor = nil
+				traceLines = 0
+				// Re-check against opener for chained traces.
+				if flavor, ok := detectTraceFlavor(line); ok {
+					f := flavor
+					activeFlavor = &f
+					traceLines = 1
+					entry.IsStackTrace = true
+				}
+			} else {
+				entry.IsStackTrace = true
+				traceLines++
+			}
+		} else if flavor, ok := detectTraceFlavor(line); ok {
+			f := flavor
+			activeFlavor = &f
+			traceLines = 1
+			entry.IsStackTrace = true
+		}
+
+		entry.Score = scoreLogLine(&entry)
+		out = append(out, entry)
+	}
+	return out
+}
+
+// ── Selection ───────────────────────────────────────────────────────
+
+func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *LogCompressorStats) []LogLine {
+	allStrings := make([]string, len(logLines))
+	for i, l := range logLines {
+		allStrings[i] = l.Content
+	}
+	maxK := lc.config.MaxTotalLines
+	adaptiveMax := adaptivesizer.ComputeOptimalK(allStrings, bias, 10, &maxK)
+
+	// Categorize.
+	var errors, fails, warnings, summaries []LogLine
+	var stackTraces [][]LogLine
+	var currentStack []LogLine
+
+	for _, line := range logLines {
+		switch line.Level {
+		case LogLevelError:
+			errors = append(errors, line)
+		case LogLevelFail:
+			fails = append(fails, line)
+		case LogLevelWarn:
+			warnings = append(warnings, line)
+		}
+		if line.IsStackTrace {
+			currentStack = append(currentStack, line)
+		} else if len(currentStack) > 0 {
+			stackTraces = append(stackTraces, currentStack)
+			currentStack = nil
+		}
+		if line.IsSummary {
+			summaries = append(summaries, line)
+		}
+	}
+	if len(currentStack) > 0 {
+		stackTraces = append(stackTraces, currentStack)
+	}
+	stats.StackTracesSeen = len(stackTraces)
+
+	// BTreeSet equivalent: use map for uniqueness, sort at end.
+	selected := make(map[int]LogLine)
+
+	for _, line := range lc.selectWithFirstLast(errors, lc.config.MaxErrors) {
+		selected[line.LineNumber] = line
+	}
+	for _, line := range lc.selectWithFirstLast(fails, lc.config.MaxErrors) {
+		selected[line.LineNumber] = line
+	}
+
+	if lc.config.DedupeWarnings {
+		original := len(warnings)
+		warnings = dedupeSimilar(warnings)
+		stats.WarningsDroppedByDedupe = original - len(warnings)
+	}
+	for i, line := range warnings {
+		if i >= lc.config.MaxWarnings {
+			break
+		}
+		selected[line.LineNumber] = line
+	}
+
+	for i, stack := range stackTraces {
+		if i >= lc.config.MaxStackTraces {
+			break
+		}
+		stats.StackTracesKept++
+		for j, line := range stack {
+			if j >= lc.config.StackTraceMaxLines {
+				break
+			}
+			selected[line.LineNumber] = line
+		}
+	}
+
+	if lc.config.KeepSummaryLines {
+		for _, line := range summaries {
+			selected[line.LineNumber] = line
+		}
+	}
+
+	// Add context lines around every selected entry.
+	selectedIndices := make(map[int]bool)
+	for idx := range selected {
+		selectedIndices[idx] = true
+	}
+	contextIndices := make(map[int]bool)
+	for idx := range selectedIndices {
+		lo := idx - lc.config.ErrorContextLines
+		if lo < 0 {
+			lo = 0
+		}
+		hi := idx + lc.config.ErrorContextLines + 1
+		if hi > len(logLines) {
+			hi = len(logLines)
+		}
+		for i := lo; i < hi; i++ {
+			if i != idx {
+				contextIndices[i] = true
+			}
+		}
+	}
+	for idx := range contextIndices {
+		if !selectedIndices[idx] && idx < len(logLines) {
+			selected[idx] = logLines[idx]
+		}
+	}
+
+	// Collect and sort by line number.
+	ordered := make([]LogLine, 0, len(selected))
+	for _, line := range selected {
+		ordered = append(ordered, line)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].LineNumber < ordered[j].LineNumber
+	})
+
+	// Apply adaptive cap.
+	if len(ordered) > adaptiveMax {
+		stats.LinesDroppedByGlobalCap += len(ordered) - adaptiveMax
+		sort.SliceStable(ordered, func(i, j int) bool {
+			if ordered[i].Score != ordered[j].Score {
+				return ordered[i].Score > ordered[j].Score
+			}
+			return ordered[i].LineNumber < ordered[j].LineNumber
+		})
+		ordered = ordered[:adaptiveMax]
+		sort.Slice(ordered, func(i, j int) bool {
+			return ordered[i].LineNumber < ordered[j].LineNumber
+		})
+	}
+
+	return ordered
+}
+
+func (lc *LogCompressor) selectWithFirstLast(lines []LogLine, maxCount int) []LogLine {
+	if len(lines) <= maxCount {
+		return lines
+	}
+	out := make([]LogLine, 0, maxCount)
+	seen := make(map[int]bool)
+	push := func(line LogLine) {
+		if !seen[line.LineNumber] {
+			seen[line.LineNumber] = true
+			out = append(out, line)
+		}
+	}
+	if lc.config.KeepFirstError {
+		push(lines[0])
+	}
+	if lc.config.KeepLastError {
+		push(lines[len(lines)-1])
+	}
+	remaining := maxCount - len(out)
+	if remaining > 0 {
+		byScore := make([]LogLine, len(lines))
+		copy(byScore, lines)
+		sort.SliceStable(byScore, func(i, j int) bool {
+			if byScore[i].Score != byScore[j].Score {
+				return byScore[i].Score > byScore[j].Score
+			}
+			return byScore[i].LineNumber < byScore[j].LineNumber
+		})
+		for _, line := range byScore {
+			if !seen[line.LineNumber] {
+				push(line)
+				if len(out) >= maxCount {
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+// ── Deduplication ───────────────────────────────────────────────────
+
+var (
+	digitRe = regexp.MustCompile(`\d+`)
+	hexRe   = regexp.MustCompile(`0x[0-9a-fA-F]+`)
+	pathRe  = regexp.MustCompile(`/[\w/]+/`)
+)
+
+func normalizeForDedupe(content string) string {
+	splitAt := strings.IndexAny(content, ":=")
+	if splitAt < 0 {
+		splitAt = len(content)
+	}
+	prefix := content[:splitAt]
+	suffix := content[splitAt:]
+	stage1 := digitRe.ReplaceAllString(suffix, "N")
+	stage2 := hexRe.ReplaceAllString(stage1, "ADDR")
+	stage3 := pathRe.ReplaceAllString(stage2, "/PATH/")
+	return prefix + stage3
+}
+
+func dedupeSimilar(lines []LogLine) []LogLine {
+	seen := make(map[string]bool)
+	out := make([]LogLine, 0, len(lines))
+	for _, line := range lines {
+		key := normalizeForDedupe(line.Content)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// ── Output formatting ───────────────────────────────────────────────
+
+func (lc *LogCompressor) formatOutput(selected []LogLine, allLines []LogLine) (string, map[string]int64) {
+	stats := map[string]int64{
+		"errors":   countLevel(allLines, LogLevelError),
+		"fails":    countLevel(allLines, LogLevelFail),
+		"warnings": countLevel(allLines, LogLevelWarn),
+		"info":     countLevel(allLines, LogLevelInfo),
+		"total":    int64(len(allLines)),
+		"selected": int64(len(selected)),
+	}
+
+	output := make([]string, 0, len(selected)+1)
+	for _, l := range selected {
+		output = append(output, l.Content)
+	}
+
+	omitted := len(allLines) - len(selected)
+	if omitted > 0 {
+		var parts []string
+		for _, entry := range []struct {
+			label string
+			key   string
+		}{
+			{"ERROR", "errors"},
+			{"FAIL", "fails"},
+			{"WARN", "warnings"},
+			{"INFO", "info"},
+		} {
+			n := stats[entry.key]
+			if n > 0 {
+				parts = append(parts, fmt.Sprintf("%d %s", n, entry.label))
+			}
+		}
+		if len(parts) > 0 {
+			output = append(output, fmt.Sprintf("[%d lines omitted: %s]", omitted, strings.Join(parts, ", ")))
+		}
+	}
+	return strings.Join(output, "\n"), stats
+}
+
+func countLevel(lines []LogLine, level LogLevel) int64 {
+	var count int64
+	for _, l := range lines {
+		if l.Level == level {
+			count++
+		}
+	}
+	return count
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+func md5Hex24(s string) string {
+	h := md5.Sum([]byte(s))
+	hex := fmt.Sprintf("%x", h)
+	return hex[:24]
+}
