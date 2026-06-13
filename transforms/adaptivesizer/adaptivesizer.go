@@ -133,28 +133,88 @@ func FindKnee(curve []int) *int {
 // single-word items contribute (word, ""). The curve at index k is the
 // running count of unique bigrams after seeing items[0..k].
 func ComputeUniqueBigramCurve(items []string) []int {
-	type bigram struct{ a, b string }
-	seen := make(map[bigram]struct{}, len(items)*2)
+	// Use FNV-style hashing of bigram pairs to avoid string key allocations.
+	// Two words are hashed into a single uint64 key.
+	seen := make(map[uint64]struct{}, len(items)*2)
 	curve := make([]int, 0, len(items))
 
+	// wordStarts/wordEnds are reused across iterations to avoid
+	// allocating a []string from strings.Fields.
+	var wordStarts, wordEnds []int
+
 	for _, item := range items {
-		lower := strings.ToLower(item)
-		words := strings.Fields(lower)
-		if len(words) < 2 {
-			first := ""
-			if len(words) > 0 {
-				first = words[0]
+		// Find word boundaries with inline lowercasing for hash computation.
+		// We avoid strings.ToLower and strings.Fields entirely.
+		wordStarts = wordStarts[:0]
+		wordEnds = wordEnds[:0]
+
+		i := 0
+		for i < len(item) {
+			// Skip whitespace.
+			for i < len(item) && isSpaceByte(item[i]) {
+				i++
 			}
-			seen[bigram{first, ""}] = struct{}{}
+			if i >= len(item) {
+				break
+			}
+			wordStarts = append(wordStarts, i)
+			for i < len(item) && !isSpaceByte(item[i]) {
+				i++
+			}
+			wordEnds = append(wordEnds, i)
+		}
+
+		nw := len(wordStarts)
+		if nw < 2 {
+			// Hash single word (or empty).
+			h := fnvWordLower(item, wordStarts, wordEnds, 0)
+			// Combine with zero second-word hash.
+			seen[h] = struct{}{}
 		} else {
-			for j := 0; j < len(words)-1; j++ {
-				seen[bigram{words[j], words[j+1]}] = struct{}{}
+			for j := 0; j < nw-1; j++ {
+				h1 := fnvWordLower(item, wordStarts, wordEnds, j)
+				h2 := fnvWordLower(item, wordStarts, wordEnds, j+1)
+				// Combine the two hashes.
+				combined := h1*6364136223846793005 + h2
+				seen[combined] = struct{}{}
 			}
 		}
 		curve = append(curve, len(seen))
 	}
 
 	return curve
+}
+
+func isSpaceByte(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+// fnvWordLower computes FNV-1a hash of the j-th word in item,
+// lowercasing ASCII bytes inline. If no words, returns a fixed hash.
+func fnvWordLower(item string, starts, ends []int, j int) uint64 {
+	if len(starts) == 0 {
+		return 0xcbf29ce484222325 // FNV offset basis for empty
+	}
+	h := uint64(0xcbf29ce484222325)
+	for i := starts[j]; i < ends[j]; i++ {
+		c := item[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		h ^= uint64(c)
+		h *= 0x100000001b3
+	}
+	return h
+}
+
+// isASCII reports whether s contains only ASCII bytes.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // Simhash computes a 64-bit SimHash fingerprint of a text string.
@@ -166,6 +226,64 @@ func ComputeUniqueBigramCurve(items []string) []int {
 //  3. Per-bit voting: +1 if set, -1 if clear.
 //  4. Final bit j is set iff votes[j] > 0 (strict).
 func Simhash(text string) uint64 {
+	// Fast path for ASCII-only strings: avoid strings.ToLower (alloc)
+	// and []rune (alloc) by working directly on bytes with inline toLower.
+	if isASCII(text) {
+		return simhashASCII(text)
+	}
+	return simhashUnicode(text)
+}
+
+// simhashASCII handles the common case where text is pure ASCII.
+// Zero allocations: operates on the original string bytes with inline lowering.
+func simhashASCII(text string) uint64 {
+	n := len(text)
+	iterCount := 1
+	if n > 3 {
+		iterCount = n - 3
+	}
+
+	var votes [64]int32
+	var buf [4]byte
+
+	for i := 0; i < iterCount; i++ {
+		end := i + 4
+		if end > n {
+			end = n
+		}
+		for k, j := 0, i; j < end; j++ {
+			c := text[j]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			buf[k] = c
+			k++
+		}
+		gramLen := end - i
+
+		digest := md5.Sum(buf[:gramLen])
+		h := binary.BigEndian.Uint64(digest[:8])
+
+		for j := range 64 {
+			if (h>>j)&1 == 1 {
+				votes[j]++
+			} else {
+				votes[j]--
+			}
+		}
+	}
+
+	var fingerprint uint64
+	for j, v := range votes {
+		if v > 0 {
+			fingerprint |= 1 << j
+		}
+	}
+	return fingerprint
+}
+
+// simhashUnicode handles the general case with non-ASCII characters.
+func simhashUnicode(text string) uint64 {
 	lower := strings.ToLower(text)
 	chars := []rune(lower)
 	n := len(chars)

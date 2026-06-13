@@ -530,26 +530,69 @@ func classifyInterfaceArray(items []interface{}) ArrayType {
 
 func interfaceToRawMessages(items []interface{}) []json.RawMessage {
 	result := make([]json.RawMessage, len(items))
-	// Use a shared buffer + encoder to avoid per-item allocation overhead.
+	// Use a single shared buffer for serialization.
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
+	buf.Grow(len(items) * 128)
 	for i, item := range items {
 		buf.Reset()
-		if err := enc.Encode(item); err != nil {
-			result[i] = json.RawMessage("null")
-		} else {
-			// Encode appends a newline; trim it and copy.
-			b := buf.Bytes()
-			if len(b) > 0 && b[len(b)-1] == '\n' {
-				b = b[:len(b)-1]
-			}
-			cp := make([]byte, len(b))
-			copy(cp, b)
-			result[i] = json.RawMessage(cp)
-		}
+		marshalInterfaceValue(&buf, item)
+		cp := make([]byte, buf.Len())
+		copy(cp, buf.Bytes())
+		result[i] = json.RawMessage(cp)
 	}
 	return result
+}
+
+// marshalInterfaceValue serializes a value produced by json.Unmarshal into buf
+// without using reflection. Handles the concrete types that json.Unmarshal
+// returns: map[string]interface{}, []interface{}, string, float64, bool, nil.
+func marshalInterfaceValue(buf *bytes.Buffer, v interface{}) {
+	switch val := v.(type) {
+	case nil:
+		buf.WriteString("null")
+	case bool:
+		if val {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case float64:
+		writeFloat64(buf, val)
+	case json.Number:
+		buf.WriteString(val.String())
+	case string:
+		writeJSONString(buf, val)
+	case []interface{}:
+		buf.WriteByte('[')
+		for i, item := range val {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			marshalInterfaceValue(buf, item)
+		}
+		buf.WriteByte(']')
+	case map[string]interface{}:
+		buf.WriteByte('{')
+		first := true
+		for k, v := range val {
+			if !first {
+				buf.WriteByte(',')
+			}
+			first = false
+			writeJSONString(buf, k)
+			buf.WriteByte(':')
+			marshalInterfaceValue(buf, v)
+		}
+		buf.WriteByte('}')
+	default:
+		// Fallback for unexpected types.
+		data, err := json.Marshal(v)
+		if err != nil {
+			buf.WriteString("null")
+		} else {
+			buf.Write(data)
+		}
+	}
 }
 
 func rawMessagesToInterface(items []json.RawMessage) []interface{} {
@@ -564,13 +607,13 @@ func rawMessagesToInterface(items []json.RawMessage) []interface{} {
 
 func interfaceMapToRawMessages(m map[string]interface{}) map[string]json.RawMessage {
 	result := make(map[string]json.RawMessage, len(m))
+	var buf bytes.Buffer
 	for k, v := range m {
-		data, err := json.Marshal(v)
-		if err != nil {
-			result[k] = json.RawMessage("null")
-		} else {
-			result[k] = data
-		}
+		buf.Reset()
+		marshalInterfaceValue(&buf, v)
+		cp := make([]byte, buf.Len())
+		copy(cp, buf.Bytes())
+		result[k] = cp
 	}
 	return result
 }

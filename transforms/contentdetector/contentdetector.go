@@ -1,7 +1,9 @@
-// Package contentdetector provides regex-based content type detection
+// Package contentdetector provides content type detection
 // for multi-format compression routing.
 //
 // Direct port of headroom-core/src/transforms/content_detector.rs.
+// Code language patterns use hand-rolled string scanning instead of regex
+// to avoid O(lines * patterns) regexp.MatchString overhead.
 package contentdetector
 
 import (
@@ -56,57 +58,13 @@ func plainTextResult(confidence float64) DetectionResult {
 	return DetectionResult{ContentType: PlainText, Confidence: confidence}
 }
 
-// Regex patterns (compiled once).
+// Regex patterns (compiled once) - kept for complex patterns not worth hand-rolling.
 var (
 	searchResultPattern = regexp.MustCompile(`^[^\s:]+:\d+:`)
 
 	diffHeaderPattern = regexp.MustCompile(`^(diff --git|diff --combined |diff --cc |--- a/|@@\s+-\d+,\d+\s+\+\d+,\d+\s+@@|@@@+\s+-\d+(?:,\d+)?\s+(?:-\d+(?:,\d+)?\s+)+\+\d+(?:,\d+)?\s+@@@+)`)
 
 	diffChangePattern = regexp.MustCompile(`^[+-][^+-]`)
-
-	// Code patterns by language.
-	pythonPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`^\s*(def|class|import|from|async def)\s+\w+`),
-		regexp.MustCompile(`^\s*@\w+`),
-		regexp.MustCompile(`^\s*"""`),
-		regexp.MustCompile(`^\s*if __name__\s*==`),
-	}
-	javascriptPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`^\s*(function|const|let|var|class|import|export)\s+`),
-		regexp.MustCompile(`^\s*(async\s+function|=>\s*\{)`),
-		regexp.MustCompile(`^\s*module\.exports`),
-	}
-	typescriptPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`^\s*(interface|type|enum|namespace)\s+\w+`),
-		regexp.MustCompile(`^:\s*(string|number|boolean|any|void)\b`),
-	}
-	goPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`^\s*(func|type|package|import)\s+`),
-		regexp.MustCompile(`^\s*func\s+\([^)]+\)\s+\w+`),
-	}
-	rustPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`^\s*(fn|struct|enum|impl|mod|use|pub)\s+`),
-		regexp.MustCompile(`^\s*#\[`),
-	}
-	javaPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`^\s*(public|private|protected)\s+(class|interface|enum)`),
-		regexp.MustCompile(`^\s*@\w+`),
-		regexp.MustCompile(`^\s*package\s+[\w.]+;`),
-	}
-
-	// Log / build output patterns. Indices 0-1 are error patterns.
-	logPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\b(ERROR|FAIL|FAILED|FATAL|CRITICAL)\b`),
-		regexp.MustCompile(`(?i)\b(WARN|WARNING)\b`),
-		regexp.MustCompile(`(?i)\b(INFO|DEBUG|TRACE)\b`),
-		regexp.MustCompile(`^\s*\d{4}-\d{2}-\d{2}`),
-		regexp.MustCompile(`^\s*\[\d{2}:\d{2}:\d{2}\]`),
-		regexp.MustCompile(`^={3,}|^-{3,}`),
-		regexp.MustCompile(`^\s*PASSED|^\s*FAILED|^\s*SKIPPED`),
-		regexp.MustCompile(`^npm ERR!|^yarn error|^cargo error`),
-		regexp.MustCompile(`Traceback \(most recent call last\)`),
-		regexp.MustCompile(`^\s*at\s+[\w.$]+\(`),
-	}
 
 	// HTML patterns.
 	htmlDoctypePattern    = regexp.MustCompile(`(?i)^\s*<!doctype\s+html`)
@@ -116,18 +74,412 @@ var (
 	htmlStructuralPattern = regexp.MustCompile(`(?i)<(div|span|script|style|link|meta|nav|header|footer|aside|article|section|main)[\s>]`)
 )
 
-type codeLanguage struct {
-	name     string
-	patterns []*regexp.Regexp
+// ---------------------------------------------------------------------------
+// String-scanning helpers (replace regex for hot-path code detection)
+// ---------------------------------------------------------------------------
+
+// skipLineWhitespace returns the index of the first non-space/tab byte.
+func skipLineWhitespace(s string) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' && s[i] != '\t' {
+			return i
+		}
+	}
+	return len(s)
 }
 
-var codeLanguages = []codeLanguage{
-	{"python", pythonPatterns},
-	{"javascript", javascriptPatterns},
-	{"typescript", typescriptPatterns},
-	{"go", goPatterns},
-	{"rust", rustPatterns},
-	{"java", javaPatterns},
+// isWordChar returns true for [a-zA-Z0-9_].
+func isWordChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// hasKeywordThenWhitespace checks if s[start:] begins with any keyword
+// followed by at least one space/tab. Matches ^\s*(kw1|kw2)\s+
+func hasKeywordThenWhitespace(s string, start int, keywords []string) bool {
+	rest := s[start:]
+	for _, kw := range keywords {
+		if len(rest) > len(kw) && rest[:len(kw)] == kw {
+			c := rest[len(kw)]
+			if c == ' ' || c == '\t' {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasKeywordThenWhitespaceWord checks if s[start:] begins with any keyword
+// followed by whitespace then a word char. Matches ^\s*(kw1|kw2)\s+\w+
+func hasKeywordThenWhitespaceWord(s string, start int, keywords []string) bool {
+	rest := s[start:]
+	for _, kw := range keywords {
+		kwLen := len(kw)
+		if len(rest) > kwLen && rest[:kwLen] == kw {
+			c := rest[kwLen]
+			if c == ' ' || c == '\t' {
+				// skip remaining whitespace, check for word char
+				j := kwLen + 1
+				for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+					j++
+				}
+				if j < len(rest) && isWordChar(rest[j]) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// hasPrefix checks if s[start:] begins with prefix.
+func hasLiteralPrefix(s string, start int, prefix string) bool {
+	end := start + len(prefix)
+	return end <= len(s) && s[start:end] == prefix
+}
+
+// containsWordCI checks if line contains any of the keywords as whole words
+// (case-insensitive). Matches (?i)\b(KW1|KW2)\b
+func containsWordCI(line string, keywords []string) bool {
+	lower := strings.ToLower(line)
+	for _, kw := range keywords {
+		idx := 0
+		for {
+			pos := strings.Index(lower[idx:], kw)
+			if pos < 0 {
+				break
+			}
+			abs := idx + pos
+			// Check word boundaries
+			before := abs == 0 || !isWordChar(lower[abs-1])
+			after := abs+len(kw) >= len(lower) || !isWordChar(lower[abs+len(kw)])
+			if before && after {
+				return true
+			}
+			idx = abs + 1
+		}
+	}
+	return false
+}
+
+// isDigit returns true for ASCII digits.
+func isDigit(c byte) bool {
+	return c >= '0' && c <= '9'
+}
+
+// ---------------------------------------------------------------------------
+// Language matchers (replace []*regexp.Regexp with func(line string) bool)
+// ---------------------------------------------------------------------------
+
+type langMatcher struct {
+	name  string
+	match func(line string) bool
+}
+
+// matchPython matches the original Python regex patterns:
+//   ^\s*(def|class|import|from|async def)\s+\w+
+//   ^\s*@\w+
+//   ^\s*"""
+//   ^\s*if __name__\s*==
+func matchPython(line string) bool {
+	start := skipLineWhitespace(line)
+	if start >= len(line) {
+		return false
+	}
+	rest := line[start:]
+
+	// ^\s*(def|class|import|from|async def)\s+\w+
+	if hasKeywordThenWhitespaceWord(line, start, []string{"async def", "def", "class", "import", "from"}) {
+		return true
+	}
+	// ^\s*@\w+
+	if rest[0] == '@' && len(rest) > 1 && isWordChar(rest[1]) {
+		return true
+	}
+	// ^\s*"""
+	if len(rest) >= 3 && rest[0] == '"' && rest[1] == '"' && rest[2] == '"' {
+		return true
+	}
+	// ^\s*if __name__\s*==
+	if hasLiteralPrefix(line, start, "if __name__") {
+		j := start + len("if __name__")
+		for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+			j++
+		}
+		if j+1 < len(line) && line[j] == '=' && line[j+1] == '=' {
+			return true
+		}
+	}
+	return false
+}
+
+// matchJavascript matches:
+//   ^\s*(function|const|let|var|class|import|export)\s+
+//   ^\s*(async\s+function|=>\s*\{)
+//   ^\s*module\.exports
+func matchJavascript(line string) bool {
+	start := skipLineWhitespace(line)
+	if start >= len(line) {
+		return false
+	}
+
+	// ^\s*(function|const|let|var|class|import|export)\s+
+	if hasKeywordThenWhitespace(line, start, []string{"function", "const", "let", "var", "class", "import", "export"}) {
+		return true
+	}
+	// ^\s*async\s+function
+	if hasKeywordThenWhitespace(line, start, []string{"async"}) {
+		j := start + 5 // len("async")
+		for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+			j++
+		}
+		if hasLiteralPrefix(line, j, "function") {
+			return true
+		}
+	}
+	// ^\s*=>\s*\{
+	rest := line[start:]
+	if len(rest) >= 2 && rest[0] == '=' && rest[1] == '>' {
+		j := 2
+		for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+			j++
+		}
+		if j < len(rest) && rest[j] == '{' {
+			return true
+		}
+	}
+	// ^\s*module\.exports
+	if hasLiteralPrefix(line, start, "module.exports") {
+		return true
+	}
+	return false
+}
+
+// matchTypescript matches:
+//   ^\s*(interface|type|enum|namespace)\s+\w+
+//   ^:\s*(string|number|boolean|any|void)\b
+func matchTypescript(line string) bool {
+	start := skipLineWhitespace(line)
+	if start >= len(line) {
+		return false
+	}
+
+	// ^\s*(interface|type|enum|namespace)\s+\w+
+	if hasKeywordThenWhitespaceWord(line, start, []string{"interface", "type", "enum", "namespace"}) {
+		return true
+	}
+	// ^:\s*(string|number|boolean|any|void)\b
+	if len(line) > 0 && line[0] == ':' {
+		j := 1
+		for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+			j++
+		}
+		for _, kw := range []string{"string", "number", "boolean", "any", "void"} {
+			end := j + len(kw)
+			if end <= len(line) && line[j:end] == kw {
+				if end == len(line) || !isWordChar(line[end]) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// matchGo matches:
+//   ^\s*(func|type|package|import)\s+
+//   ^\s*func\s+\([^)]+\)\s+\w+
+func matchGo(line string) bool {
+	start := skipLineWhitespace(line)
+	if start >= len(line) {
+		return false
+	}
+
+	// ^\s*(func|type|package|import)\s+
+	if hasKeywordThenWhitespace(line, start, []string{"func", "type", "package", "import"}) {
+		// Also check the second pattern: ^\s*func\s+\([^)]+\)\s+\w+
+		// (this is a subset of func\s+ matches so both are covered)
+		return true
+	}
+	return false
+}
+
+// matchRust matches:
+//   ^\s*(fn|struct|enum|impl|mod|use|pub)\s+
+//   ^\s*#\[
+func matchRust(line string) bool {
+	start := skipLineWhitespace(line)
+	if start >= len(line) {
+		return false
+	}
+
+	if hasKeywordThenWhitespace(line, start, []string{"fn", "struct", "enum", "impl", "mod", "use", "pub"}) {
+		return true
+	}
+	// ^\s*#\[
+	rest := line[start:]
+	if len(rest) >= 2 && rest[0] == '#' && rest[1] == '[' {
+		return true
+	}
+	return false
+}
+
+// matchJava matches:
+//   ^\s*(public|private|protected)\s+(class|interface|enum)
+//   ^\s*@\w+
+//   ^\s*package\s+[\w.]+;
+func matchJava(line string) bool {
+	start := skipLineWhitespace(line)
+	if start >= len(line) {
+		return false
+	}
+	rest := line[start:]
+
+	// ^\s*(public|private|protected)\s+(class|interface|enum)
+	for _, access := range []string{"public", "private", "protected"} {
+		if len(rest) > len(access) && rest[:len(access)] == access {
+			c := rest[len(access)]
+			if c == ' ' || c == '\t' {
+				j := len(access) + 1
+				for j < len(rest) && (rest[j] == ' ' || rest[j] == '\t') {
+					j++
+				}
+				sub := rest[j:]
+				for _, typekw := range []string{"class", "interface", "enum"} {
+					if len(sub) >= len(typekw) && sub[:len(typekw)] == typekw {
+						return true
+					}
+				}
+			}
+		}
+	}
+	// ^\s*@\w+
+	if rest[0] == '@' && len(rest) > 1 && isWordChar(rest[1]) {
+		return true
+	}
+	// ^\s*package\s+[\w.]+;
+	if hasKeywordThenWhitespace(line, start, []string{"package"}) {
+		j := start + 7 // len("package")
+		for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+			j++
+		}
+		// scan [\w.]+;
+		k := j
+		for k < len(line) && (isWordChar(line[k]) || line[k] == '.') {
+			k++
+		}
+		if k > j && k < len(line) && line[k] == ';' {
+			return true
+		}
+	}
+	return false
+}
+
+var codeLanguages = []langMatcher{
+	{"python", matchPython},
+	{"javascript", matchJavascript},
+	{"typescript", matchTypescript},
+	{"go", matchGo},
+	{"rust", matchRust},
+	{"java", matchJava},
+}
+
+// ---------------------------------------------------------------------------
+// Log/build output matchers (replace logPatterns []*regexp.Regexp)
+// ---------------------------------------------------------------------------
+
+// logMatcher is a single log-detection pattern. isError marks patterns at
+// indices 0-1 in the original logPatterns slice.
+type logMatcher struct {
+	match   func(line string) bool
+	isError bool
+}
+
+var logMatchers = []logMatcher{
+	// 0: (?i)\b(ERROR|FAIL|FAILED|FATAL|CRITICAL)\b
+	{func(line string) bool {
+		return containsWordCI(line, []string{"error", "fail", "failed", "fatal", "critical"})
+	}, true},
+	// 1: (?i)\b(WARN|WARNING)\b
+	{func(line string) bool {
+		return containsWordCI(line, []string{"warning", "warn"})
+	}, true},
+	// 2: (?i)\b(INFO|DEBUG|TRACE)\b
+	{func(line string) bool {
+		return containsWordCI(line, []string{"info", "debug", "trace"})
+	}, false},
+	// 3: ^\s*\d{4}-\d{2}-\d{2}
+	{func(line string) bool {
+		s := skipLineWhitespace(line)
+		// need at least 10 chars: YYYY-MM-DD
+		if s+10 > len(line) {
+			return false
+		}
+		return isDigit(line[s]) && isDigit(line[s+1]) && isDigit(line[s+2]) && isDigit(line[s+3]) &&
+			line[s+4] == '-' && isDigit(line[s+5]) && isDigit(line[s+6]) &&
+			line[s+7] == '-' && isDigit(line[s+8]) && isDigit(line[s+9])
+	}, false},
+	// 4: ^\s*\[\d{2}:\d{2}:\d{2}\]
+	{func(line string) bool {
+		s := skipLineWhitespace(line)
+		// need [HH:MM:SS] = 10 chars
+		if s+10 > len(line) {
+			return false
+		}
+		return line[s] == '[' && isDigit(line[s+1]) && isDigit(line[s+2]) &&
+			line[s+3] == ':' && isDigit(line[s+4]) && isDigit(line[s+5]) &&
+			line[s+6] == ':' && isDigit(line[s+7]) && isDigit(line[s+8]) &&
+			line[s+9] == ']'
+	}, false},
+	// 5: ^={3,}|^-{3,}
+	{func(line string) bool {
+		if len(line) < 3 {
+			return false
+		}
+		if line[0] == '=' && line[1] == '=' && line[2] == '=' {
+			return true
+		}
+		if line[0] == '-' && line[1] == '-' && line[2] == '-' {
+			return true
+		}
+		return false
+	}, false},
+	// 6: ^\s*PASSED|^\s*FAILED|^\s*SKIPPED
+	{func(line string) bool {
+		s := skipLineWhitespace(line)
+		return hasLiteralPrefix(line, s, "PASSED") ||
+			hasLiteralPrefix(line, s, "FAILED") ||
+			hasLiteralPrefix(line, s, "SKIPPED")
+	}, false},
+	// 7: ^npm ERR!|^yarn error|^cargo error
+	{func(line string) bool {
+		return hasLiteralPrefix(line, 0, "npm ERR!") ||
+			hasLiteralPrefix(line, 0, "yarn error") ||
+			hasLiteralPrefix(line, 0, "cargo error")
+	}, false},
+	// 8: Traceback \(most recent call last\) - substring match
+	{func(line string) bool {
+		return strings.Contains(line, "Traceback (most recent call last)")
+	}, false},
+	// 9: ^\s*at\s+[\w.$]+\(
+	{func(line string) bool {
+		s := skipLineWhitespace(line)
+		if !hasLiteralPrefix(line, s, "at") {
+			return false
+		}
+		j := s + 2
+		if j >= len(line) || (line[j] != ' ' && line[j] != '\t') {
+			return false
+		}
+		for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+			j++
+		}
+		// scan [\w.$]+
+		k := j
+		for k < len(line) && (isWordChar(line[k]) || line[k] == '.' || line[k] == '$') {
+			k++
+		}
+		return k > j && k < len(line) && line[k] == '('
+	}, false},
 }
 
 // forEachLine calls fn for each line in text, up to maxLines lines.
@@ -543,10 +895,10 @@ func tryDetectLog(text string) (DetectionResult, bool) {
 			return
 		}
 		nonEmptyLines++
-		for i, pattern := range logPatterns {
-			if pattern.MatchString(line) {
+		for _, lm := range logMatchers {
+			if lm.match(line) {
 				patternMatches++
-				if i < 2 {
+				if lm.isError {
 					errorMatches++
 				}
 				break
@@ -591,14 +943,7 @@ func tryDetectCode(text string) (DetectionResult, bool) {
 		nonEmptyLines++
 
 		for _, cl := range codeLanguages {
-			matched := false
-			for _, pattern := range cl.patterns {
-				if pattern.MatchString(line) {
-					matched = true
-					break
-				}
-			}
-			if matched {
+			if cl.match(line) {
 				found := false
 				for i := range languageScores {
 					if languageScores[i].name == cl.name {

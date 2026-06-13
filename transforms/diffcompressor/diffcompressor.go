@@ -486,6 +486,59 @@ func parseDiff(lines []string) *parsedDiff {
 
 // ── Scoring ─────────────────────────────────────────────────────────
 
+// containsFoldASCII performs case-insensitive substring search without
+// allocating a lowered copy.  substr must already be lowercase.
+func containsFoldASCII(s, substr string) bool {
+	n := len(substr)
+	if n == 0 {
+		return true
+	}
+	if n > len(s) {
+		return false
+	}
+	for i := 0; i <= len(s)-n; i++ {
+		match := true
+		for j := 0; j < n; j++ {
+			c := s[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 32
+			}
+			if c != substr[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// hunkContainsFold checks whether any line in the hunk contains substr
+// (case-insensitive, ASCII).  substr must already be lowercase.
+func hunkContainsFold(lines []string, substr string) bool {
+	for _, l := range lines {
+		if containsFoldASCII(l, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// hunkMatchesPriority checks whether any priorityPattern matches any line.
+// The patterns already carry the (?i) flag so they work on the original text.
+func hunkMatchesPriority(lines []string) bool {
+	for _, l := range lines {
+		for _, pat := range priorityPatterns {
+			if pat.MatchString(l) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func scoreHunks(files []*diffFile, context string) {
 	contextLower := strings.ToLower(context)
 	contextWords := strings.Fields(contextLower)
@@ -497,33 +550,18 @@ func scoreHunks(files []*diffFile, context string) {
 				score = ScoreChangeDensityCap
 			}
 
-			// Build lowered hunk content once using a builder instead of
-			// strings.Join + strings.ToLower which allocates two large strings.
-			var b strings.Builder
-			totalLen := 0
-			for _, l := range hunk.lines {
-				totalLen += len(l) + 1
-			}
-			b.Grow(totalLen)
-			for i, l := range hunk.lines {
-				if i > 0 {
-					b.WriteByte('\n')
-				}
-				b.WriteString(strings.ToLower(l))
-			}
-			hunkContentLower := b.String()
-
+			// Case-insensitive keyword matching without allocating a
+			// lowered copy of the entire hunk content.
 			for _, word := range contextWords {
-				if len(word) > ScoreContextMinWordLen && strings.Contains(hunkContentLower, word) {
+				if len(word) > ScoreContextMinWordLen && hunkContainsFold(hunk.lines, word) {
 					score += ScoreContextWordWeight
 				}
 			}
 
-			for _, pat := range priorityPatterns {
-				if pat.MatchString(hunkContentLower) {
-					score += ScorePriorityPatternBoost
-					break
-				}
+			// Priority patterns already have (?i) so they match the
+			// original lines directly -- no lowered string needed.
+			if hunkMatchesPriority(hunk.lines) {
+				score += ScorePriorityPatternBoost
 			}
 
 			if score > ScoreTotalCap {

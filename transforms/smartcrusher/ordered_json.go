@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strconv"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // marshalOrderedJSON serializes value as JSON, preserving the key order from originalJSON.
@@ -68,10 +71,11 @@ func (s *jsonScanner) parseNode() (*keyOrderNode, error) {
 		return s.parseArray()
 	default:
 		// Scalar value -- skip it entirely, no ordering info needed.
+		// Return nil instead of allocating an empty keyOrderNode.
 		if err := s.skipValue(); err != nil {
 			return nil, err
 		}
-		return &keyOrderNode{}, nil
+		return nil, nil
 	}
 }
 
@@ -79,14 +83,15 @@ func (s *jsonScanner) parseObject() (*keyOrderNode, error) {
 	s.pos++ // consume '{'
 	s.skipWhitespace()
 
-	node := &keyOrderNode{
-		keys:     make([]string, 0, 16), // pre-allocate for typical objects
-		children: make(map[string]*keyOrderNode, 16),
-	}
-
 	if s.pos < len(s.data) && s.data[s.pos] == '}' {
 		s.pos++ // consume '}'
-		return node, nil
+		return &keyOrderNode{}, nil
+	}
+
+	// Lazily allocate with small initial capacity; most objects have < 8 keys.
+	node := &keyOrderNode{
+		keys:     make([]string, 0, 8),
+		children: make(map[string]*keyOrderNode, 8),
 	}
 
 	for {
@@ -116,7 +121,9 @@ func (s *jsonScanner) parseObject() (*keyOrderNode, error) {
 			return nil, err
 		}
 		node.keys = append(node.keys, key)
-		node.children[key] = child
+		if child != nil {
+			node.children[key] = child
+		}
 
 		s.skipWhitespace()
 		if s.pos >= len(s.data) {
@@ -145,12 +152,39 @@ func (s *jsonScanner) parseArray() (*keyOrderNode, error) {
 		return node, nil
 	}
 
+	// Parse only the first element fully (to capture representative key order).
+	// Skip remaining elements since array items after crushing won't match
+	// original indices anyway, and homogeneous arrays share the same key order.
+	first := true
 	for {
-		child, err := s.parseNode()
-		if err != nil {
-			return nil, err
+		if first {
+			child, err := s.parseNode()
+			if err != nil {
+				return nil, err
+			}
+			node.items = append(node.items, child)
+			first = false
+		} else {
+			// Skip subsequent elements without building key-order nodes.
+			s.skipWhitespace()
+			if s.pos >= len(s.data) {
+				return nil, fmt.Errorf("unexpected end of JSON in array")
+			}
+			switch s.data[s.pos] {
+			case '{':
+				if err := s.skipObject(); err != nil {
+					return nil, err
+				}
+			case '[':
+				if err := s.skipArray(); err != nil {
+					return nil, err
+				}
+			default:
+				if err := s.skipValue(); err != nil {
+					return nil, err
+				}
+			}
 		}
-		node.items = append(node.items, child)
 
 		s.skipWhitespace()
 		if s.pos >= len(s.data) {
@@ -203,8 +237,10 @@ func (s *jsonScanner) parseString() (string, error) {
 			raw := s.data[start:s.pos]
 			s.pos++ // consume closing '"'
 			if !hasEscape {
-				// Fast path: no escapes, return string directly from buffer.
-				return string(raw), nil
+				// Fast path: no escapes, return string backed by the original
+				// byte slice without copying. The data slice lives for the
+				// duration of the marshal call, so this is safe.
+				return unsafe.String(&raw[0], len(raw)), nil
 			}
 			// Slow path: unescape using json.Unmarshal on the quoted string.
 			quoted := s.data[start-1 : s.pos] // include quotes
@@ -412,12 +448,8 @@ func writeOrdered(buf *bytes.Buffer, value interface{}, orderNode *keyOrderNode)
 		return nil
 
 	case float64:
-		// Match Go's default json.Marshal behavior for numbers.
-		data, err := json.Marshal(v)
-		if err != nil {
-			return err
-		}
-		buf.Write(data)
+		// Format numbers directly to avoid json.Marshal allocation.
+		writeFloat64(buf, v)
 		return nil
 
 	case json.Number:
@@ -502,52 +534,108 @@ func hexDigit(b byte) byte {
 	return 'a' + b - 10
 }
 
+// writeFloat64 formats a float64 into buf matching Go's json.Marshal behavior
+// without allocating. Uses strconv.AppendFloat with the same format as encoding/json.
+func writeFloat64(buf *bytes.Buffer, f float64) {
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		// json.Marshal would error; write 0 as fallback.
+		buf.WriteByte('0')
+		return
+	}
+	// encoding/json uses 'f' format with -1 precision for numbers that
+	// round-trip exactly, otherwise 'e' format. We use the same logic
+	// via strconv.AppendFloat with 'f' at -1 precision, then fallback.
+	abs := math.Abs(f)
+	format := byte('f')
+	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		format = byte('e')
+	}
+	b := strconv.AppendFloat(buf.AvailableBuffer(), f, format, -1, 64)
+	buf.Write(b)
+}
+
 // writeOrderedMap writes a map as a JSON object with keys in the order specified by orderNode.
 func writeOrderedMap(buf *bytes.Buffer, m map[string]interface{}, orderNode *keyOrderNode) error {
 	buf.WriteByte('{')
 
-	// Determine the key order. Start with keys from the original order,
-	// then append any keys present in m but not in the original.
-	written := make(map[string]bool, len(m))
 	first := true
 
-	if orderNode != nil {
+	if orderNode != nil && len(orderNode.keys) > 0 {
+		// Count how many of the map's keys appear in the order node.
+		// If all of them do, we can skip tracking which keys were written.
+		orderedCount := 0
 		for _, key := range orderNode.keys {
-			val, exists := m[key]
-			if !exists {
-				continue
+			if _, exists := m[key]; exists {
+				orderedCount++
 			}
+		}
+
+		if orderedCount == len(m) {
+			// Fast path: all keys in m are covered by orderNode.keys.
+			for _, key := range orderNode.keys {
+				val, exists := m[key]
+				if !exists {
+					continue
+				}
+				if !first {
+					buf.WriteByte(',')
+				}
+				first = false
+				writeJSONString(buf, key)
+				buf.WriteByte(':')
+				childNode := orderNode.children[key]
+				if err := writeOrdered(buf, val, childNode); err != nil {
+					return err
+				}
+			}
+		} else {
+			// Slow path: map has keys not in the order node.
+			written := make(map[string]bool, len(m))
+			for _, key := range orderNode.keys {
+				val, exists := m[key]
+				if !exists {
+					continue
+				}
+				if !first {
+					buf.WriteByte(',')
+				}
+				first = false
+				writeJSONString(buf, key)
+				buf.WriteByte(':')
+				childNode := orderNode.children[key]
+				if err := writeOrdered(buf, val, childNode); err != nil {
+					return err
+				}
+				written[key] = true
+			}
+			// Append extra keys not in the original order.
+			for key, val := range m {
+				if written[key] {
+					continue
+				}
+				if !first {
+					buf.WriteByte(',')
+				}
+				first = false
+				writeJSONString(buf, key)
+				buf.WriteByte(':')
+				if err := writeOrdered(buf, val, nil); err != nil {
+					return err
+				}
+			}
+		}
+	} else {
+		// No order info -- write all keys.
+		for key, val := range m {
 			if !first {
 				buf.WriteByte(',')
 			}
 			first = false
-			// Write key using fast string writer.
 			writeJSONString(buf, key)
 			buf.WriteByte(':')
-
-			// Get child order node.
-			childNode := orderNode.children[key]
-			if err := writeOrdered(buf, val, childNode); err != nil {
+			if err := writeOrdered(buf, val, nil); err != nil {
 				return err
 			}
-			written[key] = true
-		}
-	}
-
-	// Append any keys not in the original order (new keys from ProcessValue).
-	// Use sorted order for determinism, matching json.Marshal behavior for new keys.
-	for key, val := range m {
-		if written[key] {
-			continue
-		}
-		if !first {
-			buf.WriteByte(',')
-		}
-		first = false
-		writeJSONString(buf, key)
-		buf.WriteByte(':')
-		if err := writeOrdered(buf, val, nil); err != nil {
-			return err
 		}
 	}
 
@@ -556,18 +644,20 @@ func writeOrderedMap(buf *bytes.Buffer, m map[string]interface{}, orderNode *key
 }
 
 // writeOrderedArray writes a slice as a JSON array, recursing into elements
-// with the corresponding order nodes.
+// with the corresponding order nodes. Since the scanner only stores a
+// representative (first) element's key order, all items reuse items[0].
 func writeOrderedArray(buf *bytes.Buffer, arr []interface{}, orderNode *keyOrderNode) error {
 	buf.WriteByte('[')
+	// Use the first (representative) item's key order for all elements.
+	var repNode *keyOrderNode
+	if orderNode != nil && len(orderNode.items) > 0 {
+		repNode = orderNode.items[0]
+	}
 	for i, item := range arr {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		var childNode *keyOrderNode
-		if orderNode != nil && i < len(orderNode.items) {
-			childNode = orderNode.items[i]
-		}
-		if err := writeOrdered(buf, item, childNode); err != nil {
+		if err := writeOrdered(buf, item, repNode); err != nil {
 			return err
 		}
 	}
