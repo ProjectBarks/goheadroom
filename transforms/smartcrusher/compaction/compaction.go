@@ -328,7 +328,7 @@ func (f *CSVSchemaFormatter) FormatCompaction(c *Compaction) string {
 		var parts []string
 		for _, b := range c.Buckets {
 			keyStr := fmt.Sprintf("%v", b.Key)
-			header := fmt.Sprintf("[%s=%s]", c.Discriminator, keyStr)
+			header := "[" + c.Discriminator + "=" + keyStr + "]"
 			table := f.formatTable(&b.Schema, b.Rows, len(b.Rows))
 			parts = append(parts, header+"\n"+table)
 		}
@@ -339,35 +339,36 @@ func (f *CSVSchemaFormatter) FormatCompaction(c *Compaction) string {
 
 func (f *CSVSchemaFormatter) formatTable(schema *Schema, rows []Row, originalCount int) string {
 	var buf strings.Builder
-	// Row count header.
-	buf.WriteString(fmt.Sprintf("[%d]", originalCount))
-	// Schema header.
-	buf.WriteString("{")
+	nFields := len(schema.Fields)
+	estSize := 32 + nFields*12 + len(rows)*nFields*8
+	buf.Grow(estSize)
+	buf.WriteByte('[')
+	buf.WriteString(strconv.Itoa(originalCount))
+	buf.WriteString("]{")
 	for i, field := range schema.Fields {
 		if i > 0 {
-			buf.WriteString(",")
+			buf.WriteByte(',')
 		}
 		buf.WriteString(field.Name)
-		buf.WriteString(":")
+		buf.WriteByte(':')
 		buf.WriteString(field.TypeTag)
 		if field.Nullable {
-			buf.WriteString("?")
+			buf.WriteByte('?')
 		}
 	}
 	buf.WriteString("}\n")
-	// Data rows.
 	for _, row := range rows {
 		for i, cell := range row.Cells {
 			if i > 0 {
-				buf.WriteString(",")
+				buf.WriteByte(',')
 			}
 			typeTag := ""
-			if i < len(schema.Fields) {
+			if i < nFields {
 				typeTag = schema.Fields[i].TypeTag
 			}
-			buf.WriteString(formatCellCSV(cell, typeTag))
+			writeScalarCellCSV(&buf, cell, typeTag)
 		}
-		buf.WriteString("\n")
+		buf.WriteByte('\n')
 	}
 	return buf.String()
 }
@@ -394,9 +395,71 @@ func formatCellCSV(cell CellValue, typeTag string) string {
 		f := &CSVSchemaFormatter{}
 		return f.FormatCompaction(cell.Nested)
 	case KindOpaqueRef:
-		return fmt.Sprintf("<<ccr:%s,%s,%d>>", cell.CCRHash, cell.OpaqueK, cell.ByteSize)
+		return "<<ccr:" + cell.CCRHash + "," + cell.OpaqueK.String() + "," + strconv.Itoa(cell.ByteSize) + ">>"
 	default:
 		return ""
+	}
+}
+
+func writeScalarCellCSV(buf *strings.Builder, cell CellValue, typeTag string) {
+	switch cell.Kind {
+	case KindMissing:
+		return
+	case KindScalar:
+		writeScalarCSV(buf, cell.Scalar, typeTag)
+	case KindNested:
+		f := &CSVSchemaFormatter{}
+		buf.WriteString(f.FormatCompaction(cell.Nested))
+	case KindOpaqueRef:
+		buf.WriteString("<<ccr:")
+		buf.WriteString(cell.CCRHash)
+		buf.WriteByte(',')
+		buf.WriteString(cell.OpaqueK.String())
+		buf.WriteByte(',')
+		buf.WriteString(strconv.Itoa(cell.ByteSize))
+		buf.WriteString(">>")
+	}
+}
+
+func writeScalarCSV(buf *strings.Builder, v interface{}, typeTag string) {
+	if v == nil {
+		return
+	}
+	switch val := v.(type) {
+	case string:
+		if strings.ContainsAny(val, ",\"\n") {
+			buf.WriteString(strconv.Quote(val))
+		} else {
+			buf.WriteString(val)
+		}
+	case float64:
+		var b [32]byte
+		if typeTag == "int" && val == float64(int64(val)) {
+			s := strconv.AppendInt(b[:0], int64(val), 10)
+			buf.Write(s)
+		} else {
+			s := strconv.AppendFloat(b[:0], val, 'f', -1, 64)
+			buf.Write(s)
+			hasDot := false
+			for _, c := range s {
+				if c == '.' {
+					hasDot = true
+					break
+				}
+			}
+			if !hasDot {
+				buf.WriteString(".0")
+			}
+		}
+	case bool:
+		if val {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	default:
+		data, _ := json.Marshal(v)
+		buf.Write(data)
 	}
 }
 
@@ -407,12 +470,12 @@ func formatScalarCSV(v interface{}, typeTag string) string {
 	switch val := v.(type) {
 	case string:
 		if strings.ContainsAny(val, ",\"\n") {
-			return fmt.Sprintf("%q", val)
+			return strconv.Quote(val)
 		}
 		return val
 	case float64:
 		if typeTag == "int" && val == float64(int64(val)) {
-			return fmt.Sprintf("%d", int64(val))
+			return strconv.FormatInt(int64(val), 10)
 		}
 		s := strconv.FormatFloat(val, 'f', -1, 64)
 		if !strings.Contains(s, ".") {
@@ -502,75 +565,77 @@ func (tc *TabularCompactor) Compact(items []interface{}) *Compaction {
 		return &Compaction{Kind: CompactionUntouched, Original: items}
 	}
 
-	// Check all items are objects.
-	for _, item := range items {
-		if _, ok := item.(map[string]interface{}); !ok {
-			return &Compaction{Kind: CompactionUntouched, Original: items}
-		}
-	}
-
-	// Collect all field names.
+	// Check all items are objects and collect field names in one pass.
 	fieldSet := make(map[string]bool)
 	for _, item := range items {
-		obj := item.(map[string]interface{})
+		obj, ok := item.(map[string]interface{})
+		if !ok {
+			return &Compaction{Kind: CompactionUntouched, Original: items}
+		}
 		for k := range obj {
 			fieldSet[k] = true
 		}
 	}
+
 	fieldNames := make([]string, 0, len(fieldSet))
 	for k := range fieldSet {
 		fieldNames = append(fieldNames, k)
 	}
 	sort.Strings(fieldNames)
 
-	// Build schema.
-	schema := Schema{Fields: make([]FieldSpec, len(fieldNames))}
-	for i, name := range fieldNames {
-		typeTag := "string"
-		nullable := false
-		for _, item := range items {
-			obj := item.(map[string]interface{})
-			v, exists := obj[name]
-			if !exists || v == nil {
-				nullable = true
-				continue
-			}
-			cls := ClassifyCell(v, &tc.Config)
-			switch cls {
-			case CellInt:
-				typeTag = "int"
-			case CellFloat:
-				typeTag = "float"
-			case CellBool:
-				typeTag = "bool"
-			default:
-				typeTag = "string"
-			}
-		}
-		schema.Fields[i] = FieldSpec{Name: name, TypeTag: typeTag, Nullable: nullable}
+	nFields := len(fieldNames)
+	nItems := len(items)
+
+	typeTags := make([]string, nFields)
+	nullables := make([]bool, nFields)
+	for i := range typeTags {
+		typeTags[i] = "string"
 	}
 
-	// Build rows.
-	rows := make([]Row, len(items))
+	allCells := make([]CellValue, nItems*nFields)
+	rows := make([]Row, nItems)
+
 	for i, item := range items {
 		obj := item.(map[string]interface{})
-		cells := make([]CellValue, len(fieldNames))
+		cells := allCells[i*nFields : (i+1)*nFields]
 		for j, name := range fieldNames {
 			v, exists := obj[name]
 			if !exists {
-				cells[j] = NewMissingCell()
-			} else {
-				cells[j] = NewScalarCell(v)
+				cells[j] = CellValue{Kind: KindMissing}
+				nullables[j] = true
+				continue
+			}
+			if v == nil {
+				cells[j] = CellValue{Kind: KindScalar}
+				nullables[j] = true
+				continue
+			}
+			cells[j] = CellValue{Kind: KindScalar, Scalar: v}
+			cls := ClassifyCell(v, &tc.Config)
+			switch cls {
+			case CellInt:
+				typeTags[j] = "int"
+			case CellFloat:
+				typeTags[j] = "float"
+			case CellBool:
+				typeTags[j] = "bool"
+			default:
+				typeTags[j] = "string"
 			}
 		}
-		rows[i] = NewRow(cells)
+		rows[i] = Row{Cells: cells}
+	}
+
+	schema := Schema{Fields: make([]FieldSpec, nFields)}
+	for i, name := range fieldNames {
+		schema.Fields[i] = FieldSpec{Name: name, TypeTag: typeTags[i], Nullable: nullables[i]}
 	}
 
 	return &Compaction{
 		Kind:          CompactionTable,
 		Schema:        schema,
 		Rows:          rows,
-		OriginalCount: len(items),
+		OriginalCount: nItems,
 	}
 }
 
@@ -600,12 +665,18 @@ func (s *CompactionStage) Run(items []interface{}) (*Compaction, string) {
 
 // EmitOpaqueCCRMarker produces a CCR marker for opaque content.
 func EmitOpaqueCCRMarker(content string, kind OpaqueKind) string {
-	return fmt.Sprintf("<<ccr:%s,%s,%d>>", hashContent(content), kind, len(content))
+	return "<<ccr:" + hashContent(content) + "," + kind.String() + "," + strconv.Itoa(len(content)) + ">>"
 }
 
 func hashContent(s string) string {
 	h := sha256.Sum256([]byte(s))
-	return fmt.Sprintf("%x", h)[:12]
+	const hexChars = "0123456789abcdef"
+	var buf [12]byte
+	for i := 0; i < 6; i++ {
+		buf[i*2] = hexChars[h[i]>>4]
+		buf[i*2+1] = hexChars[h[i]&0x0f]
+	}
+	return string(buf[:])
 }
 
 // DocumentCompactor walks a JSON document and compacts arrays.

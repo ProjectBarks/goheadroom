@@ -651,10 +651,7 @@ func IsJsonArrayOfDicts(text string) bool {
 	if result.ContentType != JsonArray {
 		return false
 	}
-	if isDictArray, ok := result.Metadata["is_dict_array"].(bool); ok {
-		return isDictArray
-	}
-	return false
+	return result.Confidence == 1.0
 }
 
 // tryDetectJSON checks if text is a JSON array without full parsing.
@@ -667,7 +664,7 @@ func tryDetectJSON(text string) (DetectionResult, bool) {
 
 	// Validate JSON structure and count items using a manual scanner.
 	// This replaces json.Unmarshal([]byte(trimmed), &arr) which allocated heavily.
-	itemCount, isDictArray, valid := scanJSONArray(trimmed)
+	_, isDictArray, valid := scanJSONArray(trimmed)
 	if !valid {
 		return DetectionResult{}, false
 	}
@@ -680,10 +677,6 @@ func tryDetectJSON(text string) (DetectionResult, bool) {
 	return DetectionResult{
 		ContentType: JsonArray,
 		Confidence:  confidence,
-		Metadata: map[string]interface{}{
-			"item_count":    itemCount,
-			"is_dict_array": isDictArray,
-		},
 	}, true
 }
 
@@ -896,10 +889,6 @@ func tryDetectDiff(text string) (DetectionResult, bool) {
 	return DetectionResult{
 		ContentType: GitDiff,
 		Confidence:  confidence,
-		Metadata: map[string]interface{}{
-			"header_matches": headerMatches,
-			"change_lines":   changeMatches,
-		},
 	}, true
 }
 
@@ -942,11 +931,6 @@ func tryDetectHTML(text string) (DetectionResult, bool) {
 	return DetectionResult{
 		ContentType: Html,
 		Confidence:  confidence,
-		Metadata: map[string]interface{}{
-			"has_doctype":     hasDoctype,
-			"has_html_tag":    hasHTMLTag,
-			"structural_tags": structuralMatches,
-		},
 	}, true
 }
 
@@ -987,10 +971,6 @@ func tryDetectSearch(text string) (DetectionResult, bool) {
 	return DetectionResult{
 		ContentType: SearchResults,
 		Confidence:  confidence,
-		Metadata: map[string]interface{}{
-			"matching_lines": matchingLines,
-			"total_lines":    nonEmptyLines,
-		},
 	}, true
 }
 
@@ -1034,11 +1014,6 @@ func tryDetectLog(text string) (DetectionResult, bool) {
 	return DetectionResult{
 		ContentType: BuildOutput,
 		Confidence:  confidence,
-		Metadata: map[string]interface{}{
-			"pattern_matches": patternMatches,
-			"error_matches":   errorMatches,
-			"total_lines":     nonEmptyLines,
-		},
 	}, true
 }
 
@@ -1088,12 +1063,10 @@ func tryDetectCode(text string) (DetectionResult, bool) {
 	}
 
 	// Find max score, first-on-tie (matching Python max() behavior).
-	var bestLang string
 	var bestScore uint32
 	for _, ls := range languageScores {
 		if ls.score > bestScore {
 			bestScore = ls.score
-			bestLang = ls.name
 		}
 	}
 
@@ -1111,9 +1084,5 @@ func tryDetectCode(text string) (DetectionResult, bool) {
 	return DetectionResult{
 		ContentType: SourceCode,
 		Confidence:  confidence,
-		Metadata: map[string]interface{}{
-			"language":        bestLang,
-			"pattern_matches": bestScore,
-		},
 	}, true
 }

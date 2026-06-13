@@ -258,8 +258,6 @@ func (sc *SmartCrusher) CrushArrayWithParsed(items []json.RawMessage, parsedItem
 	}
 	adaptiveK := adaptivesizer.ComputeOptimalK(itemStrings, bias, 3, maxK)
 
-	// Tier-1 boundary: array already small enough -- passthrough,
-	// nothing to compact, nothing to drop.
 	if len(items) <= adaptiveK {
 		allIndices := makeRangeSlice(len(items))
 		result := make([]json.RawMessage, len(items))
@@ -271,9 +269,7 @@ func (sc *SmartCrusher) CrushArrayWithParsed(items []json.RawMessage, parsedItem
 		}
 	}
 
-	// Lossless-first: try tabular compaction before lossy selection.
 	if sc.Compaction != nil && len(items) >= sc.Config.MinItemsToAnalyze {
-		// Use pre-parsed values if available, avoiding redundant unmarshal.
 		parsed := parsedItems
 		if parsed == nil {
 			parsed = make([]interface{}, len(items))
@@ -285,19 +281,15 @@ func (sc *SmartCrusher) CrushArrayWithParsed(items []json.RawMessage, parsedItem
 		}
 		c, rendered := sc.Compaction.Run(parsed)
 		if c.WasCompacted() {
-			inputBytes := estimateArrayBytes(itemStrings)
+			inputBytes := estimateArrayBytesRaw(items)
 			savingsRatio := 0.0
 			if inputBytes > 0 {
 				savingsRatio = 1.0 - float64(len(rendered))/float64(inputBytes)
 			}
 			if savingsRatio >= sc.Config.LosslessMinSavingsRatio {
 				kind := compactionKindStr(c)
-				allIndices := makeRangeSlice(len(items))
-				result := make([]json.RawMessage, len(items))
-				copy(result, items)
 				return CrushArrayResult{
-					Items:          result,
-					KeptIndices:    allIndices,
+					Items:          items,
 					StrategyInfo:   "lossless:" + kind,
 					Compacted:      &rendered,
 					CompactionKind: &kind,
@@ -535,12 +527,23 @@ func groupKey(item json.RawMessage) string {
 }
 
 func estimateArrayBytes(itemStrings []string) int {
-	total := 2 // [ and ]
+	total := 2
 	for i, s := range itemStrings {
 		if i > 0 {
-			total += 2 // ", "
+			total += 2
 		}
 		total += len(s)
+	}
+	return total
+}
+
+func estimateArrayBytesRaw(items []json.RawMessage) int {
+	total := 2
+	for i, raw := range items {
+		if i > 0 {
+			total += 2
+		}
+		total += len(raw)
 	}
 	return total
 }

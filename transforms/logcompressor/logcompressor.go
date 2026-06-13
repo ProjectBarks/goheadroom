@@ -321,25 +321,83 @@ func DetectFormat(lines []string) LogFormat {
 // ── Level classification ────────────────────────────────────────────
 
 func classifyLevel(line string) LogLevel {
-	if textutil.ContainsSingleWordCI(line, "ERROR") || textutil.ContainsSingleWordCI(line, "FATAL") || textutil.ContainsSingleWordCI(line, "CRITICAL") {
-		return LogLevelError
+	n := len(line)
+	if n == 0 {
+		return LogLevelUnknown
 	}
-	if textutil.ContainsSingleWordCI(line, "FAILED") || textutil.ContainsSingleWordCI(line, "FAIL") {
-		return LogLevelFail
+	best := LogLevel(-1)
+	for i := 0; i < n; i++ {
+		c := line[i] | 0x20
+		if c < 'a' || c > 'z' {
+			continue
+		}
+		if i > 0 && textutil.IsWordChar(line[i-1]) {
+			continue
+		}
+		switch c {
+		case 'e':
+			if matchLevelWord(line, i, n, "error", 5) {
+				return LogLevelError
+			}
+		case 'f':
+			if matchLevelWord(line, i, n, "fatal", 5) {
+				return LogLevelError
+			}
+			if best < LogLevelFail {
+				if matchLevelWord(line, i, n, "failed", 6) || matchLevelWord(line, i, n, "fail", 4) {
+					best = LogLevelFail
+				}
+			}
+		case 'c':
+			if matchLevelWord(line, i, n, "critical", 8) {
+				return LogLevelError
+			}
+		case 'w':
+			if best < LogLevelWarn {
+				if matchLevelWord(line, i, n, "warning", 7) || matchLevelWord(line, i, n, "warn", 4) {
+					best = LogLevelWarn
+				}
+			}
+		case 'i':
+			if best < LogLevelInfo {
+				if matchLevelWord(line, i, n, "info", 4) {
+					best = LogLevelInfo
+				}
+			}
+		case 'd':
+			if best < LogLevelDebug {
+				if matchLevelWord(line, i, n, "debug", 5) {
+					best = LogLevelDebug
+				}
+			}
+		case 't':
+			if best < LogLevelTrace {
+				if matchLevelWord(line, i, n, "trace", 5) {
+					best = LogLevelTrace
+				}
+			}
+		}
 	}
-	if textutil.ContainsSingleWordCI(line, "WARNING") || textutil.ContainsSingleWordCI(line, "WARN") {
-		return LogLevelWarn
+	if best < 0 {
+		return LogLevelUnknown
 	}
-	if textutil.ContainsSingleWordCI(line, "INFO") {
-		return LogLevelInfo
+	return best
+}
+
+func matchLevelWord(line string, i, n int, kw string, kwLen int) bool {
+	if i+kwLen > n {
+		return false
 	}
-	if textutil.ContainsSingleWordCI(line, "DEBUG") {
-		return LogLevelDebug
+	for j := 1; j < kwLen; j++ {
+		if line[i+j]|0x20 != kw[j] {
+			return false
+		}
 	}
-	if textutil.ContainsSingleWordCI(line, "TRACE") {
-		return LogLevelTrace
+	end := i + kwLen
+	if end < n && textutil.IsWordChar(line[end]) {
+		return false
 	}
-	return LogLevelUnknown
+	return true
 }
 
 // ── Stack trace detection ───────────────────────────────────────────

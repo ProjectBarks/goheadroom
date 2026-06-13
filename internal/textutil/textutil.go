@@ -58,8 +58,21 @@ func matchWordAt(s string, i int, kw string) bool {
 	if i+kwLen > len(s) {
 		return false
 	}
-	for j := 1; j < kwLen; j++ {
-		if s[i+j]|0x20 != kw[j] {
+	switch {
+	case kwLen >= 4:
+		if s[i+1]|0x20 != kw[1] || s[i+2]|0x20 != kw[2] || s[i+3]|0x20 != kw[3] {
+			return false
+		}
+		for j := 4; j < kwLen; j++ {
+			if s[i+j]|0x20 != kw[j] {
+				return false
+			}
+		}
+	case kwLen >= 2:
+		if s[i+1]|0x20 != kw[1] {
+			return false
+		}
+		if kwLen == 3 && s[i+2]|0x20 != kw[2] {
 			return false
 		}
 	}
@@ -74,11 +87,18 @@ func ContainsWordCI(line string, keywords []string) bool {
 	if len(keywords) == 0 || len(line) == 0 {
 		return false
 	}
+	minLen := len(keywords[0])
 	var firstChars [26]bool
 	for _, kw := range keywords {
 		if len(kw) > 0 && kw[0] >= 'a' && kw[0] <= 'z' {
 			firstChars[kw[0]-'a'] = true
 		}
+		if len(kw) < minLen {
+			minLen = len(kw)
+		}
+	}
+	if len(line) < minLen {
+		return false
 	}
 	for i := 0; i < len(line); i++ {
 		c := line[i] | 0x20
