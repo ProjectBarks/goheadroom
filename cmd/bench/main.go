@@ -4,7 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
+	"strconv"
+	"time"
 
 	"github.com/uber/goheadroom/ccr"
 	"github.com/uber/goheadroom/tokenizer"
@@ -23,7 +24,7 @@ type Fixture struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: bench <fixture.json>\n")
+		fmt.Fprintf(os.Stderr, "usage: bench <fixture.json> [--bench N]\n")
 		os.Exit(1)
 	}
 
@@ -39,20 +40,50 @@ func main() {
 		os.Exit(1)
 	}
 
+	// --bench N: run the transform N times, output ns/op to stderr, output to stdout once
+	benchN := 0
+	for i := 2; i < len(os.Args); i++ {
+		if os.Args[i] == "--bench" && i+1 < len(os.Args) {
+			benchN, _ = strconv.Atoi(os.Args[i+1])
+		}
+	}
+
+	run := makeRunner(fix)
+	if run == nil {
+		fmt.Fprintf(os.Stderr, "unsupported: %s\n", fix.Transform)
+		os.Exit(2)
+	}
+
+	if benchN > 0 {
+		// Warm up
+		run()
+		// Timed iterations
+		start := time.Now()
+		for i := 0; i < benchN; i++ {
+			run()
+		}
+		elapsed := time.Since(start)
+		nsPerOp := elapsed.Nanoseconds() / int64(benchN)
+		fmt.Fprintf(os.Stderr, "%d\n", nsPerOp)
+	}
+
+	// Final run for output
+	fmt.Print(run())
+}
+
+func makeRunner(fix Fixture) func() string {
 	switch fix.Transform {
 	case "diff_compressor":
 		var input string
 		json.Unmarshal(fix.Input, &input)
 		dc := diffcompressor.New(diffcompressor.DefaultConfig())
-		result := dc.Compress(input, "")
-		fmt.Print(result.Compressed)
+		return func() string { return dc.Compress(input, "").Compressed }
 
 	case "log_compressor":
 		var input string
 		json.Unmarshal(fix.Input, &input)
 		lc := logcompressor.New(logcompressor.DefaultConfig())
-		result, _ := lc.Compress(input, 0.0)
-		fmt.Print(result.Compressed)
+		return func() string { r, _ := lc.Compress(input, 0.0); return r.Compressed }
 
 	case "smart_crusher":
 		var w struct {
@@ -63,47 +94,45 @@ func main() {
 		json.Unmarshal(fix.Input, &w)
 		cfg := smartcrusher.DefaultSmartCrusherConfig()
 		crusher := smartcrusher.NewSmartCrusherBuilder(cfg).Build()
-		result := crusher.Crush(w.Content, w.Query, w.Bias)
-		fmt.Print(result.Compressed)
+		return func() string { return crusher.Crush(w.Content, w.Query, w.Bias).Compressed }
 
 	case "tokenizer":
 		var input string
 		json.Unmarshal(fix.Input, &input)
 		tok := tokenizer.GetTokenizer("gpt-4o")
-		count := tok.CountText(input)
-		fmt.Print(count)
+		return func() string { return strconv.Itoa(tok.CountText(input)) }
 
 	case "content_detector":
 		var input string
 		json.Unmarshal(fix.Input, &input)
-		det := contentdetector.DetectContentType(input)
-		name := ctName(det.ContentType)
-		fmt.Printf("%s:%.2f", name, det.Confidence)
+		return func() string {
+			det := contentdetector.DetectContentType(input)
+			return fmt.Sprintf("%s:%.2f", ctName(det.ContentType), det.Confidence)
+		}
 
 	case "ccr":
 		var input []json.RawMessage
 		json.Unmarshal(fix.Input, &input)
 		if len(input) > 0 {
 			raw, _ := json.Marshal(input[0])
-			key := ccr.ComputeKey(raw)
-			store := ccr.NewInMemoryStore()
-			store.Put(key, raw)
-			got, ok := store.Get(key)
-			if ok && len(got) > 0 {
-				fmt.Print("OK:" + key)
-			} else {
-				fmt.Print("FAIL")
+			return func() string {
+				key := ccr.ComputeKey(raw)
+				store := ccr.NewInMemoryStore()
+				store.Put(key, raw)
+				got, ok := store.Get(key)
+				if ok && len(got) > 0 {
+					return "OK:" + key
+				}
+				return "FAIL"
 			}
-		} else {
-			fmt.Print("OK:empty")
 		}
+		return func() string { return "OK:empty" }
 
 	case "cache_aligner":
-		fmt.Print("SKIP:cache_aligner")
+		return func() string { return "SKIP:cache_aligner" }
 
 	default:
-		fmt.Fprintf(os.Stderr, "unsupported: %s\n", fix.Transform)
-		os.Exit(2)
+		return nil
 	}
 }
 
@@ -121,8 +150,4 @@ func ctName(ct contentdetector.ContentType) string {
 		return n
 	}
 	return "unknown"
-}
-
-func init() {
-	_ = strings.TrimSpace
 }

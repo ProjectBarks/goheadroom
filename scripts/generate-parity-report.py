@@ -4,7 +4,7 @@ Parity report generator: runs Go and Rust CLIs on every fixture,
 compares outputs, times cold (CLI) and warm (library) paths,
 generates self-contained HTML with diffs and dual benchmarks.
 """
-import json, os, subprocess, sys, time, difflib, re
+import json, os, subprocess, sys, time, difflib
 from pathlib import Path
 from html import escape
 from collections import defaultdict
@@ -12,7 +12,6 @@ from collections import defaultdict
 GO_BIN = "/tmp/goheadroom-bench"
 RUST_BIN = os.path.expanduser("~/headroom-src/target/release/headroom-bench")
 FIXTURES_DIR = os.path.expanduser("~/goheadroom/testdata/parity")
-GO_TEST = os.path.expanduser("~/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.3.darwin-arm64/bin/go")
 
 NORMALIZE_TRANSFORMS = {"content_detector", "ccr", "cache_aligner"}
 
@@ -34,6 +33,22 @@ def run_timed(binary, fixture_path, runs=3):
         except Exception as e:
             stdout = f"ERROR: {e}"
     return stdout, rc, best_ms if best_ms < float("inf") else 0
+
+def run_warm(binary, fixture_path, iterations=50):
+    """Run binary with --bench N, return ns/op from stderr."""
+    try:
+        r = subprocess.run(
+            [binary, fixture_path, "--bench", str(iterations)],
+            capture_output=True, text=True, timeout=30
+        )
+        if r.returncode == 0:
+            for line in r.stderr.strip().splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    return int(line)
+    except Exception:
+        pass
+    return 0
 
 def normalize_output(transform, output):
     if transform == "content_detector":
@@ -67,52 +82,9 @@ def compute_diff_html(go_out, rust_out):
         lines.append(f"<span class='diff-hunk'>... {len(diff)-50} more lines</span>")
     return "\n".join(lines)
 
-def run_go_benchmarks():
-    """Run go test -bench=Cold/ and parse ns/op, B/op, allocs/op per transform."""
-    goheadroom_dir = os.path.expanduser("~/goheadroom")
-    warm = {}
-    cold = {}
-
-    for mode in ["Warm", "Cold"]:
-        print(f"  Running {mode} benchmarks...", file=sys.stderr)
-        try:
-            r = subprocess.run(
-                [GO_TEST, "test", f"-bench={mode}/", "-benchtime=1s", "-benchmem", "."],
-                capture_output=True, text=True, timeout=600, cwd=goheadroom_dir
-            )
-            target = warm if mode == "Warm" else cold
-            for line in r.stdout.splitlines():
-                if not line.startswith(f"Benchmark{mode}/"):
-                    continue
-                # Parse: BenchmarkWarm/SmartCrusher/fixture.json-16  1234  56789 ns/op  1234 B/op  56 allocs/op
-                m = re.match(
-                    rf'^Benchmark{mode}/(\w+)/(\S+)-\d+\s+\d+\s+([\d.]+)\s+ns/op\s+(\d+)\s+B/op\s+(\d+)\s+allocs/op',
-                    line
-                )
-                if m:
-                    transform = m.group(1)
-                    fixture = m.group(2)
-                    ns_op = float(m.group(3))
-                    b_op = int(m.group(4))
-                    allocs = int(m.group(5))
-                    target[fixture] = {
-                        "transform": transform,
-                        "ns_op": ns_op,
-                        "us_op": ns_op / 1000,
-                        "b_op": b_op,
-                        "allocs": allocs,
-                    }
-        except Exception as e:
-            print(f"  {mode} benchmark error: {e}", file=sys.stderr)
-
-    return warm, cold
-
 def main():
     fixtures = sorted(Path(FIXTURES_DIR).rglob("*.json"))
     print(f"Processing {len(fixtures)} fixtures...", file=sys.stderr)
-
-    # Run Go benchmarks first (warm + cold)
-    warm_bench, cold_bench = run_go_benchmarks()
 
     results = []
     for i, fpath in enumerate(fixtures):
@@ -144,12 +116,15 @@ def main():
         if status == "fail":
             diff_html = compute_diff_html(go_out[:3000], rust_out[:3000])
 
-        fname = fpath.name
-        wb = warm_bench.get(fname, {})
-        cb = cold_bench.get(fname, {})
+        # Warm benchmarks via --bench (library-only, no startup)
+        iters = 50
+        if transform in ("tokenizer",):
+            iters = 10  # tokenizer is slow
+        go_warm_ns = run_warm(GO_BIN, str(fpath), iters) if go_rc == 0 else 0
+        rust_warm_ns = run_warm(RUST_BIN, str(fpath), iters) if rust_rc == 0 else 0
 
         results.append({
-            "fixture": fname,
+            "fixture": fpath.name,
             "category": category,
             "transform": transform,
             "status": status,
@@ -160,12 +135,8 @@ def main():
             "go_out": go_out[:1500],
             "rust_out": rust_out[:1500],
             "diff_html": diff_html,
-            "warm_us": round(wb.get("us_op", 0), 1),
-            "warm_allocs": wb.get("allocs", 0),
-            "warm_bop": wb.get("b_op", 0),
-            "cold_us": round(cb.get("us_op", 0), 1),
-            "cold_allocs": cb.get("allocs", 0),
-            "cold_bop": cb.get("b_op", 0),
+            "go_warm_us": round(go_warm_ns / 1000, 1) if go_warm_ns else 0,
+            "rust_warm_us": round(rust_warm_ns / 1000, 1) if rust_warm_ns else 0,
         })
         if (i+1) % 20 == 0:
             print(f"  {i+1}/{len(fixtures)}...", file=sys.stderr)
@@ -178,15 +149,6 @@ def fmt_us(us):
     if us >= 1000:
         return f"{us/1000:.1f}ms"
     return f"{us:.0f}us"
-
-def fmt_bytes(b):
-    if b == 0:
-        return "-"
-    if b >= 1048576:
-        return f"{b/1048576:.1f}MB"
-    if b >= 1024:
-        return f"{b/1024:.0f}KB"
-    return f"{b}B"
 
 def generate_html(results):
     total = len(results)
@@ -202,27 +164,33 @@ def generate_html(results):
     avg_go = sum(r["go_ms"] for r in results if r["go_ms"] > 0) / max(1, sum(1 for r in results if r["go_ms"] > 0))
     avg_rust = sum(r["rust_ms"] for r in results if r["rust_ms"] > 0) / max(1, sum(1 for r in results if r["rust_ms"] > 0))
 
-    # Compute per-category warm benchmark summaries for the summary table
+    # Per-category summary
     cat_summaries = {}
     for cat, entries in cats.items():
-        warm_times = [e["warm_us"] for e in entries if e["warm_us"] > 0]
-        cold_times = [e["cold_us"] for e in entries if e["cold_us"] > 0]
-        if warm_times:
+        go_warm = [e["go_warm_us"] for e in entries if e["go_warm_us"] > 0]
+        rust_warm = [e["rust_warm_us"] for e in entries if e["rust_warm_us"] > 0]
+        if go_warm:
             cat_summaries[cat] = {
-                "warm_avg": sum(warm_times) / len(warm_times),
-                "warm_max": max(warm_times),
-                "cold_max": max(cold_times) if cold_times else 0,
+                "go_warm_avg": sum(go_warm) / len(go_warm),
+                "rust_warm_avg": sum(rust_warm) / len(rust_warm) if rust_warm else 0,
+                "go_warm_max": max(go_warm),
+                "rust_warm_max": max(rust_warm) if rust_warm else 0,
             }
 
-    # Summary cards for warm benchmarks
     summary_rows = []
     for cat in sorted(cat_summaries):
         s = cat_summaries[cat]
+        ratio = ""
+        if s["rust_warm_avg"] > 0 and s["go_warm_avg"] > 0:
+            r = s["go_warm_avg"] / s["rust_warm_avg"]
+            ratio = f"{r:.2f}x"
         summary_rows.append(
             f'<tr><td>{escape(cat)}</td>'
-            f'<td class="mono r">{fmt_us(s["warm_avg"])}</td>'
-            f'<td class="mono r">{fmt_us(s["warm_max"])}</td>'
-            f'<td class="mono r">{fmt_us(s["cold_max"])}</td></tr>'
+            f'<td class="mono r" style="color:#00add8">{fmt_us(s["go_warm_avg"])}</td>'
+            f'<td class="mono r" style="color:#f97316">{fmt_us(s["rust_warm_avg"])}</td>'
+            f'<td class="mono r">{ratio}</td>'
+            f'<td class="mono r" style="color:#00add8">{fmt_us(s["go_warm_max"])}</td>'
+            f'<td class="mono r" style="color:#f97316">{fmt_us(s["rust_warm_max"])}</td></tr>'
         )
 
     rows = []
@@ -231,17 +199,22 @@ def generate_html(results):
         cat_pass = sum(1 for e in entries if e["status"] == "pass")
         cat_total = len(entries)
         cat_color = "#3fb950" if cat_pass == cat_total else "#f85149"
-        rows.append(f'''<tr class="cat-row"><td colspan="12"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
+        rows.append(f'''<tr class="cat-row"><td colspan="11"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
 
         for e in sorted(entries, key=lambda x: x["fixture"]):
             s = e["status"]
             icon = {"pass": "&#10003;", "fail": "&#10007;", "both_skip": "&#8212;", "go_error": "&#9888;", "rust_error": "&#9888;"}.get(s, "?")
             color = {"pass": "#3fb950", "fail": "#f85149"}.get(s, "#8b949e")
 
+            warm_ratio = ""
+            if e["go_warm_us"] > 0 and e["rust_warm_us"] > 0:
+                r = e["go_warm_us"] / e["rust_warm_us"]
+                warm_ratio = f"{r:.2f}x"
+
             cli_ratio = ""
             if e["go_ms"] > 0 and e["rust_ms"] > 0:
-                ratio = e["go_ms"] / e["rust_ms"]
-                cli_ratio = f"{ratio:.1f}x"
+                r = e["go_ms"] / e["rust_ms"]
+                cli_ratio = f"{r:.1f}x"
 
             detail_id = e["fixture"].replace(".", "_")
             has_diff = "fail" == s and e["diff_html"]
@@ -253,15 +226,15 @@ def generate_html(results):
 <td>{escape(e["transform"])}</td>
 <td class="mono r">{e["go_bytes"]}</td>
 <td class="mono r">{e["rust_bytes"]}</td>
-<td class="mono r warm-col">{fmt_us(e["warm_us"])}</td>
-<td class="mono r warm-col">{fmt_bytes(e["warm_bop"])}</td>
-<td class="mono r warm-col">{e["warm_allocs"] if e["warm_allocs"] else "-"}</td>
+<td class="mono r warm-col">{fmt_us(e["go_warm_us"])}</td>
+<td class="mono r warm-col" style="color:#f0a870">{fmt_us(e["rust_warm_us"])}</td>
+<td class="mono r">{warm_ratio}</td>
 <td class="mono r cold-col">{e["go_ms"]:.1f}</td>
-<td class="mono r cold-col">{e["rust_ms"]:.1f}</td>
-<td class="mono r cold-col">{cli_ratio}</td>
+<td class="mono r cold-col" style="color:#f0a870">{e["rust_ms"]:.1f}</td>
+<td class="mono r">{cli_ratio}</td>
 </tr>''')
             if has_diff:
-                rows.append(f'''<tr class="diff-row hidden" id="diff_{detail_id}"><td colspan="12"><div class="diff-box"><pre>{e["diff_html"]}</pre></div></td></tr>''')
+                rows.append(f'''<tr class="diff-row hidden" id="diff_{detail_id}"><td colspan="11"><div class="diff-box"><pre>{e["diff_html"]}</pre></div></td></tr>''')
 
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -299,13 +272,10 @@ td.r{{text-align:right}}
 .diff-add{{color:#3fb950;display:block}}.diff-del{{color:#f85149;display:block}}.diff-hunk{{color:#8b949e;display:block}}
 .hidden{{display:none}}
 tr.fhide{{display:none}}
-.th-warm{{color:#58a6ff!important}}
-.th-cold{{color:#f97316!important}}
 .warm-col{{color:#8db9e8}}
 .cold-col{{color:#d4956a}}
 .summary-table{{width:auto;margin-bottom:1.5rem}}
 .summary-table td,.summary-table th{{padding:.4rem 1.2rem}}
-.section-label{{font-size:.75rem;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;padding:.3rem .8rem;background:#161b22;border:1px solid #30363d;border-radius:4px;margin-right:.5rem}}
 </style></head><body><div class="wrap">
 <h1>goheadroom Parity Report</h1>
 <p class="sub">Go vs Rust output comparison across {total} parity fixtures. Click failed rows to see diff.</p>
@@ -322,12 +292,14 @@ tr.fhide{{display:none}}
 <div class="card"><div class="card-v" style="color:#f97316">{avg_rust:.1f}ms</div><div class="card-l">Avg Rust CLI</div></div>
 </div></div>
 
-<h2>Benchmark Summary (per category)</h2>
+<h2>Warm Benchmark Summary (library throughput, no startup)</h2>
 <table class="summary-table"><thead><tr>
 <th>Category</th>
-<th class="r th-warm">Warm Avg</th>
-<th class="r th-warm">Warm Max</th>
-<th class="r th-cold">Cold Max</th>
+<th class="r" style="color:#00add8">Go Avg</th>
+<th class="r" style="color:#f97316">Rust Avg</th>
+<th class="r">Ratio</th>
+<th class="r" style="color:#00add8">Go Max</th>
+<th class="r" style="color:#f97316">Rust Max</th>
 </tr></thead><tbody>
 {"".join(summary_rows)}
 </tbody></table>
@@ -342,8 +314,8 @@ tr.fhide{{display:none}}
 <table><thead><tr>
 <th></th><th>Fixture</th><th>Transform</th>
 <th class="r">Go B</th><th class="r">Rust B</th>
-<th class="r th-warm">Warm</th><th class="r th-warm">B/op</th><th class="r th-warm">Allocs</th>
-<th class="r th-cold">Go CLI</th><th class="r th-cold">Rust CLI</th><th class="r th-cold">Ratio</th>
+<th class="r" style="color:#00add8">Go Warm</th><th class="r" style="color:#f97316">Rust Warm</th><th class="r">Warm Ratio</th>
+<th class="r" style="color:#00add8">Go CLI</th><th class="r" style="color:#f97316">Rust CLI</th><th class="r">CLI Ratio</th>
 </tr></thead><tbody>
 {"".join(rows)}
 </tbody></table>
