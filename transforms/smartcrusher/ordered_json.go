@@ -7,7 +7,12 @@ import (
 	"math"
 	"strconv"
 	"unicode/utf8"
+	"unsafe"
 )
+
+func bytesToString(b []byte) string {
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
 
 // marshalOrderedJSON serializes value as JSON, preserving the key order from originalJSON.
 // Keys present in value but not in originalJSON are appended at the end.
@@ -114,11 +119,11 @@ func (s *jsonValueScanner) parseValue() (interface{}, error) {
 func (s *jsonValueScanner) parseObject() (map[string]interface{}, error) {
 	s.pos++
 	s.skipWhitespace()
-	m := make(map[string]interface{})
 	if s.pos < len(s.data) && s.data[s.pos] == '}' {
 		s.pos++
-		return m, nil
+		return make(map[string]interface{}, 0), nil
 	}
+	m := make(map[string]interface{}, 8)
 	for {
 		s.skipWhitespace()
 		if s.pos >= len(s.data) || s.data[s.pos] != '"' {
@@ -161,8 +166,8 @@ func (s *jsonValueScanner) parseArray() (interface{}, error) {
 		s.pos++
 		return &rawBackedArray{}, nil
 	}
-	var items []interface{}
-	var rawItems []json.RawMessage
+	items := make([]interface{}, 0, 8)
+	rawItems := make([]json.RawMessage, 0, 8)
 	for {
 		s.skipWhitespace()
 		start := s.pos
@@ -170,11 +175,8 @@ func (s *jsonValueScanner) parseArray() (interface{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		end := s.pos
-		raw := make([]byte, end-start)
-		copy(raw, s.data[start:end])
 		items = append(items, val)
-		rawItems = append(rawItems, json.RawMessage(raw))
+		rawItems = append(rawItems, json.RawMessage(s.data[start:s.pos]))
 		s.skipWhitespace()
 		if s.pos >= len(s.data) {
 			return nil, fmt.Errorf("unexpected end of array")
@@ -220,7 +222,7 @@ func (s *jsonValueScanner) parseString() (string, error) {
 			raw := s.data[start:s.pos]
 			s.pos++
 			if !hasEscape {
-				return string(raw), nil
+				return bytesToString(raw), nil
 			}
 			quoted := s.data[start-1 : s.pos]
 			var result string
@@ -244,7 +246,7 @@ func (s *jsonValueScanner) parseNumber() (float64, error) {
 		}
 		break
 	}
-	f, err := strconv.ParseFloat(string(s.data[start:s.pos]), 64)
+	f, err := strconv.ParseFloat(bytesToString(s.data[start:s.pos]), 64)
 	if err != nil {
 		return 0, err
 	}
@@ -449,10 +451,7 @@ func (s *jsonScanner) parseString() (string, error) {
 			raw := s.data[start:s.pos]
 			s.pos++ // consume closing '"'
 			if !hasEscape {
-				// Fast path: no escapes, return string backed by the original
-				// byte slice without copying. The data slice lives for the
-				// duration of the marshal call, so this is safe.
-				return string(raw), nil
+				return bytesToString(raw), nil
 			}
 			// Slow path: unescape using json.Unmarshal on the quoted string.
 			quoted := s.data[start-1 : s.pos] // include quotes

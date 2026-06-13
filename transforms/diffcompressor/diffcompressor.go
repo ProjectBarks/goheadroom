@@ -207,8 +207,8 @@ func (dc *DiffCompressor) CompressWithStore(content, context string, store ccr.C
 			fileLabel := file.oldFile + " -> " + file.newFile
 			stats.HunksDroppedPerFile[fileLabel] = droppedCount
 			for _, h := range dropped {
-				if len(h.lines) > largestDropped {
-					largestDropped = len(h.lines)
+				if h.lineCount() > largestDropped {
+					largestDropped = h.lineCount()
 				}
 			}
 		}
@@ -217,8 +217,8 @@ func (dc *DiffCompressor) CompressWithStore(content, context string, store ccr.C
 		compressedHunks := make([]*diffHunk, 0, len(selected))
 		for _, hunk := range selected {
 			trimmed := reduceContext(hunk, dc.config.MaxContextLines)
-			if len(trimmed.lines) > largestKept {
-				largestKept = len(trimmed.lines)
+			if trimmed.lineCount() > largestKept {
+				largestKept = trimmed.lineCount()
 			}
 			contextKeptTotal += trimmed.contextLines
 			compressedHunks = append(compressedHunks, trimmed)
@@ -309,10 +309,27 @@ func (dc *DiffCompressor) CompressWithStore(content, context string, store ccr.C
 type diffHunk struct {
 	header       string
 	lines        []string
+	li           *textutil.LineIndex
+	lineStart    int
+	lineEnd      int
 	additions    int
 	deletions    int
 	contextLines int
 	score        float64
+}
+
+func (h *diffHunk) lineCount() int {
+	if h.lines != nil {
+		return len(h.lines)
+	}
+	return h.lineEnd - h.lineStart
+}
+
+func (h *diffHunk) lineAt(i int) string {
+	if h.lines != nil {
+		return h.lines[i]
+	}
+	return h.li.Line(h.lineStart + i)
 }
 
 type diffFile struct {
@@ -394,44 +411,35 @@ func parseDiff(li *textutil.LineIndex) *parsedDiff {
 		line := li.Line(idx)
 		lineLen := len(line)
 
-		// Fast path: when inside a hunk, the vast majority of lines are
-		// content lines starting with '+', '-', ' ', '\', or empty.
-		// Check those first to avoid any regex matching on the hot path.
 		if currentHunk != nil && lineLen > 0 {
 			c := line[0]
 			switch c {
 			case '+':
 				if lineLen < 4 || line[1] != '+' || line[2] != '+' {
-					// Addition line (not "+++").
 					currentHunk.additions++
-					currentHunk.lines = append(currentHunk.lines, line)
+					currentHunk.lineEnd = idx + 1
 					continue
 				}
 			case '-':
 				if lineLen < 4 || line[1] != '-' || line[2] != '-' {
-					// Deletion line (not "---").
 					currentHunk.deletions++
-					currentHunk.lines = append(currentHunk.lines, line)
+					currentHunk.lineEnd = idx + 1
 					continue
 				}
 			case ' ':
 				currentHunk.contextLines++
-				currentHunk.lines = append(currentHunk.lines, line)
+				currentHunk.lineEnd = idx + 1
 				continue
 			case '\\':
-				// "\ No newline at end of file" etc.
-				currentHunk.lines = append(currentHunk.lines, line)
+				currentHunk.lineEnd = idx + 1
 				continue
 			}
-			// Fall through for lines starting with 'd', '@', '+'(+++), '-'(---), etc.
 		} else if currentHunk != nil {
-			// Empty line inside a hunk = context.
 			currentHunk.contextLines++
-			currentHunk.lines = append(currentHunk.lines, line)
+			currentHunk.lineEnd = idx + 1
 			continue
 		}
 
-		// Diff header: "diff --git ...", "diff --combined ...", "diff --cc ..."
 		if lineLen > 10 && line[0] == 'd' && line[1] == 'i' && isDiffHeader(line) {
 			if currentHunk != nil {
 				if currentFile != nil {
@@ -454,31 +462,29 @@ func parseDiff(li *textutil.LineIndex) *parsedDiff {
 			continue
 		}
 
-		// Hunk header: lines starting with '@'.
 		if lineLen > 0 && line[0] == '@' && hunkHeaderRe.MatchString(line) {
 			if currentHunk != nil {
 				currentFile.hunks = append(currentFile.hunks, currentHunk)
 			}
 			currentHunk = &diffHunk{
-				header: line,
-				lines:  make([]string, 0, 32),
+				header:    line,
+				li:        li,
+				lineStart: idx + 1,
+				lineEnd:   idx + 1,
 			}
 			continue
 		}
 
-		// --- a/file
 		if lineLen > 3 && line[0] == '-' && line[1] == '-' && line[2] == '-' && oldFileRe.MatchString(line) {
 			currentFile.oldFile = line
 			continue
 		}
 
-		// +++ b/file
 		if lineLen > 3 && line[0] == '+' && line[1] == '+' && line[2] == '+' && newFileRe.MatchString(line) {
 			currentFile.newFile = line
 			continue
 		}
 
-		// File-level markers (these are uncommon, only in file header sections).
 		if lineLen > 0 {
 			switch line[0] {
 			case 'n':
@@ -520,9 +526,8 @@ func parseDiff(li *textutil.LineIndex) *parsedDiff {
 			}
 		}
 
-		// If inside a hunk, this is an "other" line.
 		if currentHunk != nil {
-			currentHunk.lines = append(currentHunk.lines, line)
+			currentHunk.lineEnd = idx + 1
 		}
 	}
 
@@ -573,20 +578,20 @@ func containsFoldASCII(s, substr string) bool {
 
 // hunkContainsFold checks whether any line in the hunk contains substr
 // (case-insensitive, ASCII).  substr must already be lowercase.
-func hunkContainsFold(lines []string, substr string) bool {
-	for _, l := range lines {
-		if containsFoldASCII(l, substr) {
+func hunkContainsFoldH(h *diffHunk, substr string) bool {
+	n := h.lineCount()
+	for i := 0; i < n; i++ {
+		if containsFoldASCII(h.lineAt(i), substr) {
 			return true
 		}
 	}
 	return false
 }
 
-// hunkMatchesPriority checks whether any priority keyword appears as a
-// whole word (case-insensitive) in any line. This replaces the previous
-// regex-based approach for better performance.
-func hunkMatchesPriority(lines []string) bool {
-	for _, l := range lines {
+func hunkMatchesPriorityH(h *diffHunk) bool {
+	n := h.lineCount()
+	for i := 0; i < n; i++ {
+		l := h.lineAt(i)
 		for _, group := range priorityKeywords {
 			if textutil.ContainsAnyWordCI(l, group) {
 				return true
@@ -666,13 +671,13 @@ func scoreHunks(files []*diffFile, context string) {
 					j++
 				}
 				word := contextLower[i:j]
-				if len(word) > ScoreContextMinWordLen && hunkContainsFold(hunk.lines, word) {
+				if len(word) > ScoreContextMinWordLen && hunkContainsFoldH(hunk, word) {
 					score += ScoreContextWordWeight
 				}
 				i = j
 			}
 
-			if hunkMatchesPriority(hunk.lines) {
+			if hunkMatchesPriorityH(hunk) {
 				score += ScorePriorityPatternBoost
 			}
 
@@ -773,10 +778,11 @@ func extractLineNumber(header string) int {
 // ── Context trimming ────────────────────────────────────────────────
 
 func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
-	n := len(hunk.lines)
+	n := hunk.lineCount()
 
 	changeCount := 0
-	for _, line := range hunk.lines {
+	for i := 0; i < n; i++ {
+		line := hunk.lineAt(i)
 		if len(line) > 0 && (line[0] == '+' || line[0] == '-') {
 			changeCount++
 		}
@@ -788,7 +794,9 @@ func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
 			take = n
 		}
 		lines := make([]string, take)
-		copy(lines, hunk.lines[:take])
+		for i := 0; i < take; i++ {
+			lines[i] = hunk.lineAt(i)
+		}
 		return &diffHunk{
 			header:       hunk.header,
 			lines:        lines,
@@ -807,7 +815,8 @@ func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
 	}
 
 	keep := make([]bool, n)
-	for i, line := range hunk.lines {
+	for i := 0; i < n; i++ {
+		line := hunk.lineAt(i)
 		if len(line) == 0 {
 			continue
 		}
@@ -839,7 +848,7 @@ func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
 		if !keep[i] {
 			continue
 		}
-		line := hunk.lines[i]
+		line := hunk.lineAt(i)
 		newLines = append(newLines, line)
 		if len(line) > 0 && line[0] == '+' {
 			additions++
@@ -862,7 +871,8 @@ func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
 
 func reduceContextSmall(hunk *diffHunk, maxContext, n, estCap int) *diffHunk {
 	var keepMask uint64
-	for i, line := range hunk.lines {
+	for i := 0; i < n; i++ {
+		line := hunk.lineAt(i)
 		if len(line) == 0 {
 			continue
 		}
@@ -894,7 +904,7 @@ func reduceContextSmall(hunk *diffHunk, maxContext, n, estCap int) *diffHunk {
 		if keepMask&(1<<uint(i)) == 0 {
 			continue
 		}
-		line := hunk.lines[i]
+		line := hunk.lineAt(i)
 		newLines = append(newLines, line)
 		if len(line) > 0 && line[0] == '+' {
 			additions++
@@ -921,11 +931,11 @@ func formatOutput(preDiffLines []string, files []*diffFile, filesAffected, total
 	// Estimate capacity: count total lines and approximate average line length.
 	totalLines := len(preDiffLines)
 	for _, f := range files {
-		totalLines += 1 // header
+		totalLines += 1
 		totalLines += len(f.renameLines)
-		totalLines += 3 // mode/binary/old/new file lines
+		totalLines += 3
 		for _, h := range f.hunks {
-			totalLines += 1 + len(h.lines)
+			totalLines += 1 + h.lineCount()
 		}
 	}
 	totalLines += 2 // summary footer
@@ -976,9 +986,10 @@ func formatOutput(preDiffLines []string, files []*diffFile, filesAffected, total
 		for _, h := range f.hunks {
 			b.WriteByte('\n')
 			b.WriteString(h.header)
-			for _, l := range h.lines {
+			nc := h.lineCount()
+			for i := 0; i < nc; i++ {
 				b.WriteByte('\n')
-				b.WriteString(l)
+				b.WriteString(h.lineAt(i))
 			}
 		}
 	}

@@ -196,11 +196,8 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 	format := detectFormatLines(allLines)
 	stats.Format = &format
 
-	maxK := lc.config.MaxTotalLines
-	adaptiveMax := adaptivesizer.ComputeOptimalK(allLines, bias, 10, &maxK)
-
 	logLines := lc.parseLinesFromStrings(allLines)
-	selected := lc.selectLinesWithMax(logLines, adaptiveMax, &stats)
+	selected := lc.selectLines(logLines, allLines, bias, &stats)
 	compressedBody, outputStats := lc.formatOutput(selected, logLines)
 	compressed := compressedBody
 
@@ -626,7 +623,52 @@ func (lc *LogCompressor) parseLines(lines []string) []LogLine {
 
 // ── Selection ───────────────────────────────────────────────────────
 
+func (lc *LogCompressor) selectLines(logLines []LogLine, allLines []string, bias float64, stats *LogCompressorStats) []LogLine {
+	const adaptiveMinK = 10
+	maxK := lc.config.MaxTotalLines
+	ordered := lc.selectLinesCore(logLines, stats)
+
+	if len(ordered) > adaptiveMinK {
+		adaptiveMax := adaptivesizer.ComputeOptimalK(allLines, bias, adaptiveMinK, &maxK)
+		if len(ordered) > adaptiveMax {
+			stats.LinesDroppedByGlobalCap += len(ordered) - adaptiveMax
+			sort.SliceStable(ordered, func(i, j int) bool {
+				if ordered[i].Score != ordered[j].Score {
+					return ordered[i].Score > ordered[j].Score
+				}
+				return ordered[i].LineNumber < ordered[j].LineNumber
+			})
+			ordered = ordered[:adaptiveMax]
+			sort.Slice(ordered, func(i, j int) bool {
+				return ordered[i].LineNumber < ordered[j].LineNumber
+			})
+		}
+	}
+
+	return ordered
+}
+
 func (lc *LogCompressor) selectLinesWithMax(logLines []LogLine, adaptiveMax int, stats *LogCompressorStats) []LogLine {
+	ordered := lc.selectLinesCore(logLines, stats)
+
+	if len(ordered) > adaptiveMax {
+		stats.LinesDroppedByGlobalCap += len(ordered) - adaptiveMax
+		sort.SliceStable(ordered, func(i, j int) bool {
+			if ordered[i].Score != ordered[j].Score {
+				return ordered[i].Score > ordered[j].Score
+			}
+			return ordered[i].LineNumber < ordered[j].LineNumber
+		})
+		ordered = ordered[:adaptiveMax]
+		sort.Slice(ordered, func(i, j int) bool {
+			return ordered[i].LineNumber < ordered[j].LineNumber
+		})
+	}
+
+	return ordered
+}
+
+func (lc *LogCompressor) selectLinesCore(logLines []LogLine, stats *LogCompressorStats) []LogLine {
 	n := len(logLines)
 
 	var errorIdx, failIdx, warnIdx, summaryIdx []int
@@ -734,20 +776,6 @@ func (lc *LogCompressor) selectLinesWithMax(logLines []LogLine, adaptiveMax int,
 		if sel[i] {
 			ordered = append(ordered, logLines[i])
 		}
-	}
-
-	if len(ordered) > adaptiveMax {
-		stats.LinesDroppedByGlobalCap += len(ordered) - adaptiveMax
-		sort.SliceStable(ordered, func(i, j int) bool {
-			if ordered[i].Score != ordered[j].Score {
-				return ordered[i].Score > ordered[j].Score
-			}
-			return ordered[i].LineNumber < ordered[j].LineNumber
-		})
-		ordered = ordered[:adaptiveMax]
-		sort.Slice(ordered, func(i, j int) bool {
-			return ordered[i].LineNumber < ordered[j].LineNumber
-		})
 	}
 
 	return ordered

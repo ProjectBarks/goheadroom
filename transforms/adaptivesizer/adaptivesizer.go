@@ -131,24 +131,17 @@ func FindKnee(curve []int) *int {
 // single-word items contribute (word, ""). The curve at index k is the
 // running count of unique bigrams after seeing items[0..k].
 func ComputeUniqueBigramCurve(items []string) []int {
-	// Use FNV-style hashing of bigram pairs to avoid string key allocations.
-	// Two words are hashed into a single uint64 key.
-	seen := make(map[uint64]struct{}, len(items)*2)
-	curve := make([]int, 0, len(items))
+	seen := newUint64Set(len(items) * 2)
+	curve := make([]int, len(items))
 
-	// wordStarts/wordEnds are reused across iterations to avoid
-	// allocating a []string from strings.Fields.
 	var wordStarts, wordEnds []int
 
-	for _, item := range items {
-		// Find word boundaries with inline lowercasing for hash computation.
-		// We avoid strings.ToLower and strings.Fields entirely.
+	for idx, item := range items {
 		wordStarts = wordStarts[:0]
 		wordEnds = wordEnds[:0]
 
 		i := 0
 		for i < len(item) {
-			// Skip whitespace.
 			for i < len(item) && isSpaceByte(item[i]) {
 				i++
 			}
@@ -164,23 +157,77 @@ func ComputeUniqueBigramCurve(items []string) []int {
 
 		nw := len(wordStarts)
 		if nw < 2 {
-			// Hash single word (or empty).
 			h := fnvWordLower(item, wordStarts, wordEnds, 0)
-			// Combine with zero second-word hash.
-			seen[h] = struct{}{}
+			seen.add(h)
 		} else {
 			for j := 0; j < nw-1; j++ {
 				h1 := fnvWordLower(item, wordStarts, wordEnds, j)
 				h2 := fnvWordLower(item, wordStarts, wordEnds, j+1)
-				// Combine the two hashes.
 				combined := h1*6364136223846793005 + h2
-				seen[combined] = struct{}{}
+				seen.add(combined)
 			}
 		}
-		curve = append(curve, len(seen))
+		curve[idx] = seen.count
 	}
 
 	return curve
+}
+
+type uint64Set struct {
+	slots []uint64
+	mask  uint64
+	count int
+}
+
+const uint64SetEmpty = 0
+
+func newUint64Set(hint int) uint64Set {
+	sz := 16
+	for sz < hint*2 {
+		sz <<= 1
+	}
+	return uint64Set{
+		slots: make([]uint64, sz),
+		mask:  uint64(sz - 1),
+	}
+}
+
+func (s *uint64Set) add(key uint64) {
+	if key == uint64SetEmpty {
+		key = 0xFFFFFFFFFFFFFFFF
+	}
+	pos := key & s.mask
+	for {
+		existing := s.slots[pos]
+		if existing == uint64SetEmpty {
+			s.slots[pos] = key
+			s.count++
+			if s.count*4 > len(s.slots)*3 {
+				s.grow()
+			}
+			return
+		}
+		if existing == key {
+			return
+		}
+		pos = (pos + 1) & s.mask
+	}
+}
+
+func (s *uint64Set) grow() {
+	oldSlots := s.slots
+	newSize := len(oldSlots) * 2
+	s.slots = make([]uint64, newSize)
+	s.mask = uint64(newSize - 1)
+	for _, k := range oldSlots {
+		if k != uint64SetEmpty {
+			pos := k & s.mask
+			for s.slots[pos] != uint64SetEmpty {
+				pos = (pos + 1) & s.mask
+			}
+			s.slots[pos] = k
+		}
+	}
 }
 
 func isSpaceByte(b byte) bool {
@@ -237,7 +284,6 @@ func Simhash(text string) uint64 {
 func simhashASCII(text string) uint64 {
 	n := len(text)
 
-	// Pre-lowercase the entire string once. Use stack buffer for short strings.
 	var stackBuf [256]byte
 	var lower []byte
 	if n <= 256 {
@@ -259,7 +305,6 @@ func simhashASCII(text string) uint64 {
 	var votes [64]int32
 
 	if n >= 4 {
-		// Common path: unrolled 4-byte gram FNV-1a, no buf array needed.
 		for i := 0; i <= n-4; i++ {
 			h := fnvOffset
 			h ^= uint64(lower[i])
@@ -280,7 +325,6 @@ func simhashASCII(text string) uint64 {
 			}
 		}
 	} else {
-		// Short string (< 4 chars): single iteration on entire string.
 		h := fnvOffset
 		for i := 0; i < n; i++ {
 			h ^= uint64(lower[i])
