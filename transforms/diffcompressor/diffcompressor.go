@@ -743,7 +743,7 @@ func passThroughResult(content string, lineCount int) DiffCompressionResult {
 }
 
 func countSplitLines(s string) int {
-	return len(strings.Split(s, "\n"))
+	return strings.Count(s, "\n") + 1
 }
 
 func md5Hex24(s string) string {

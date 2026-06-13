@@ -11,10 +11,13 @@ type entry struct {
 }
 
 // InMemoryStore is a thread-safe, capacity-bounded, TTL-aware CCR store.
+// Uses a ring buffer for FIFO eviction order to avoid unbounded backing-array growth.
 type InMemoryStore struct {
 	mu       sync.RWMutex
 	data     map[string]entry
-	order    []string // FIFO order for eviction
+	ring     []string // circular buffer for eviction order
+	head     int      // index of oldest entry in ring
+	count    int      // number of valid entries in ring
 	capacity int
 	ttl      time.Duration
 }
@@ -28,7 +31,7 @@ func NewInMemoryStore() *InMemoryStore {
 func NewInMemoryStoreWithOptions(capacity int, ttl time.Duration) *InMemoryStore {
 	return &InMemoryStore{
 		data:     make(map[string]entry, capacity),
-		order:    make([]string, 0, capacity),
+		ring:     make([]string, capacity),
 		capacity: capacity,
 		ttl:      ttl,
 	}
@@ -37,24 +40,28 @@ func NewInMemoryStoreWithOptions(capacity int, ttl time.Duration) *InMemoryStore
 // Put stores a value. Idempotent on the same key (overwrites in place).
 // If capacity is exceeded, the oldest entry is evicted (FIFO).
 func (s *InMemoryStore) Put(key string, value []byte) {
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if _, exists := s.data[key]; exists {
 		// Overwrite in place; no change to order.
-		s.data[key] = entry{value: value, expiresAt: time.Now().Add(s.ttl)}
+		s.data[key] = entry{value: value, expiresAt: now.Add(s.ttl)}
 		return
 	}
 
 	// Evict oldest if at capacity.
-	for len(s.data) >= s.capacity && len(s.order) > 0 {
-		oldest := s.order[0]
-		s.order = s.order[1:]
+	for len(s.data) >= s.capacity && s.count > 0 {
+		oldest := s.ring[s.head]
+		s.head = (s.head + 1) % s.capacity
+		s.count--
 		delete(s.data, oldest)
 	}
 
-	s.data[key] = entry{value: value, expiresAt: time.Now().Add(s.ttl)}
-	s.order = append(s.order, key)
+	s.data[key] = entry{value: value, expiresAt: now.Add(s.ttl)}
+	tail := (s.head + s.count) % s.capacity
+	s.ring[tail] = key
+	s.count++
 }
 
 // Get retrieves a value. Returns (nil, false) on miss or expiry.
@@ -68,19 +75,15 @@ func (s *InMemoryStore) Get(key string) ([]byte, bool) {
 		return nil, false
 	}
 
-	if time.Now().After(e.expiresAt) {
+	now := time.Now()
+	if now.After(e.expiresAt) {
 		// Double-check under write lock to avoid TOCTOU race.
 		s.mu.Lock()
 		e2, stillThere := s.data[key]
-		if stillThere && time.Now().After(e2.expiresAt) {
+		if stillThere && now.After(e2.expiresAt) {
 			delete(s.data, key)
-			// Remove from order slice.
-			for i, k := range s.order {
-				if k == key {
-					s.order = append(s.order[:i], s.order[i+1:]...)
-					break
-				}
-			}
+			// Leave stale key in ring; eviction loop in Put handles it
+			// via delete(s.data, oldest) being a no-op for missing keys.
 		}
 		s.mu.Unlock()
 		return nil, false

@@ -5,7 +5,6 @@
 package contentdetector
 
 import (
-	"encoding/json"
 	"math"
 	"regexp"
 	"strings"
@@ -54,7 +53,7 @@ type DetectionResult struct {
 }
 
 func plainTextResult(confidence float64) DetectionResult {
-	return DetectionResult{ContentType: PlainText, Confidence: confidence, Metadata: map[string]interface{}{}}
+	return DetectionResult{ContentType: PlainText, Confidence: confidence}
 }
 
 // Regex patterns (compiled once).
@@ -131,10 +130,44 @@ var codeLanguages = []codeLanguage{
 	{"java", javaPatterns},
 }
 
+// forEachLine calls fn for each line in text, up to maxLines lines.
+// It avoids allocating a []string slice via strings.Split.
+func forEachLine(text string, maxLines int, fn func(line string)) {
+	remaining := text
+	count := 0
+	for count < maxLines && len(remaining) > 0 {
+		idx := strings.IndexByte(remaining, '\n')
+		var line string
+		if idx < 0 {
+			line = remaining
+			remaining = ""
+		} else {
+			line = remaining[:idx]
+			remaining = remaining[idx+1:]
+		}
+		fn(line)
+		count++
+	}
+}
+
+// isAllWhitespace checks if a string is empty or only whitespace
+// without allocating (unlike strings.TrimSpace).
+func isAllWhitespace(s string) bool {
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // DetectContentType analyzes text and returns the most likely content type.
 // Port of Rust detect_content_type().
 func DetectContentType(text string) DetectionResult {
-	if len(text) == 0 || len(strings.TrimSpace(text)) == 0 {
+	if len(text) == 0 || isAllWhitespace(text) {
 		return plainTextResult(0.0)
 	}
 
@@ -184,28 +217,19 @@ func IsJsonArrayOfDicts(text string) bool {
 	return false
 }
 
+// tryDetectJSON checks if text is a JSON array without full parsing.
+// Uses manual scanning instead of json.Unmarshal to avoid allocations.
 func tryDetectJSON(text string) (DetectionResult, bool) {
 	trimmed := strings.TrimSpace(text)
 	if len(trimmed) == 0 || trimmed[0] != '[' {
 		return DetectionResult{}, false
 	}
 
-	var arr []json.RawMessage
-	if err := json.Unmarshal([]byte(trimmed), &arr); err != nil {
+	// Validate JSON structure and count items using a manual scanner.
+	// This replaces json.Unmarshal([]byte(trimmed), &arr) which allocated heavily.
+	itemCount, isDictArray, valid := scanJSONArray(trimmed)
+	if !valid {
 		return DetectionResult{}, false
-	}
-
-	itemCount := len(arr)
-	isDictArray := false
-	if itemCount > 0 {
-		isDictArray = true
-		for _, raw := range arr {
-			var obj map[string]interface{}
-			if err := json.Unmarshal(raw, &obj); err != nil {
-				isDictArray = false
-				break
-			}
-		}
 	}
 
 	confidence := 0.8
@@ -223,22 +247,196 @@ func tryDetectJSON(text string) (DetectionResult, bool) {
 	}, true
 }
 
-func tryDetectDiff(text string) (DetectionResult, bool) {
-	lines := strings.Split(text, "\n")
-	limit := len(lines)
-	if limit > 500 {
-		limit = 500
+// scanJSONArray validates that s is a JSON array, counts its elements,
+// and checks whether every element is a JSON object (dict).
+// Returns (itemCount, isDictArray, valid).
+func scanJSONArray(s string) (int, bool, bool) {
+	// s[0] == '[' is guaranteed by caller.
+	i := 1
+	i = skipWhitespace(s, i)
+	if i >= len(s) {
+		return 0, false, false
 	}
 
+	// Empty array
+	if s[i] == ']' {
+		return 0, false, true
+	}
+
+	itemCount := 0
+	isDictArray := true
+
+	for {
+		i = skipWhitespace(s, i)
+		if i >= len(s) {
+			return 0, false, false
+		}
+
+		// Check if this element starts with '{'
+		if s[i] != '{' {
+			isDictArray = false
+		}
+
+		// Skip one JSON value
+		var ok bool
+		i, ok = skipJSONValue(s, i)
+		if !ok {
+			return 0, false, false
+		}
+		itemCount++
+
+		i = skipWhitespace(s, i)
+		if i >= len(s) {
+			return 0, false, false
+		}
+
+		if s[i] == ']' {
+			// Check no trailing content
+			j := skipWhitespace(s, i+1)
+			if j < len(s) {
+				return 0, false, false
+			}
+			return itemCount, isDictArray && itemCount > 0, true
+		}
+		if s[i] == ',' {
+			i++
+			continue
+		}
+		return 0, false, false
+	}
+}
+
+func skipWhitespace(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+// skipJSONValue advances past one complete JSON value starting at s[i].
+// Returns the new index and whether parsing succeeded.
+func skipJSONValue(s string, i int) (int, bool) {
+	if i >= len(s) {
+		return i, false
+	}
+
+	switch s[i] {
+	case '"':
+		return skipJSONString(s, i)
+	case '{':
+		return skipJSONContainer(s, i, '{', '}')
+	case '[':
+		return skipJSONContainer(s, i, '[', ']')
+	case 't': // true
+		if i+4 <= len(s) && s[i:i+4] == "true" {
+			return i + 4, true
+		}
+		return i, false
+	case 'f': // false
+		if i+5 <= len(s) && s[i:i+5] == "false" {
+			return i + 5, true
+		}
+		return i, false
+	case 'n': // null
+		if i+4 <= len(s) && s[i:i+4] == "null" {
+			return i + 4, true
+		}
+		return i, false
+	default:
+		// number: optional minus, digits, optional fraction, optional exponent
+		if s[i] == '-' || (s[i] >= '0' && s[i] <= '9') {
+			return skipJSONNumber(s, i)
+		}
+		return i, false
+	}
+}
+
+func skipJSONString(s string, i int) (int, bool) {
+	// s[i] == '"'
+	i++
+	for i < len(s) {
+		if s[i] == '\\' {
+			i += 2 // skip escaped char
+			continue
+		}
+		if s[i] == '"' {
+			return i + 1, true
+		}
+		i++
+	}
+	return i, false
+}
+
+// skipJSONContainer skips a balanced { } or [ ] block including nested content.
+func skipJSONContainer(s string, i int, open, close byte) (int, bool) {
+	depth := 1
+	i++ // skip opening bracket/brace
+	for i < len(s) {
+		switch s[i] {
+		case '"':
+			var ok bool
+			i, ok = skipJSONString(s, i)
+			if !ok {
+				return i, false
+			}
+			continue
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return i + 1, true
+			}
+		}
+		i++
+	}
+	return i, false
+}
+
+func skipJSONNumber(s string, i int) (int, bool) {
+	start := i
+	if i < len(s) && s[i] == '-' {
+		i++
+	}
+	if i >= len(s) || s[i] < '0' || s[i] > '9' {
+		return start, false
+	}
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i < len(s) && s[i] == '.' {
+		i++
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	}
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	}
+	return i, true
+}
+
+func tryDetectDiff(text string) (DetectionResult, bool) {
 	var headerMatches, changeMatches uint32
-	for _, line := range lines[:limit] {
+	forEachLine(text, 500, func(line string) {
 		if diffHeaderPattern.MatchString(line) {
 			headerMatches++
 		}
 		if diffChangePattern.MatchString(line) {
 			changeMatches++
 		}
-	}
+	})
 
 	if headerMatches == 0 {
 		return DetectionResult{}, false
@@ -303,28 +501,18 @@ func tryDetectHTML(text string) (DetectionResult, bool) {
 }
 
 func tryDetectSearch(text string) (DetectionResult, bool) {
-	lines := strings.Split(text, "\n")
-	limit := len(lines)
-	if limit > 100 {
-		limit = 100
-	}
-	lines = lines[:limit]
-
-	if len(lines) == 0 {
-		return DetectionResult{}, false
-	}
-
 	var matchingLines uint32
 	var nonEmptyLines uint32
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
+
+	forEachLine(text, 100, func(line string) {
+		if isAllWhitespace(line) {
+			return
 		}
 		nonEmptyLines++
 		if searchResultPattern.MatchString(line) {
 			matchingLines++
 		}
-	}
+	})
 
 	if matchingLines == 0 || nonEmptyLines == 0 {
 		return DetectionResult{}, false
@@ -347,22 +535,12 @@ func tryDetectSearch(text string) (DetectionResult, bool) {
 }
 
 func tryDetectLog(text string) (DetectionResult, bool) {
-	lines := strings.Split(text, "\n")
-	limit := len(lines)
-	if limit > 200 {
-		limit = 200
-	}
-	lines = lines[:limit]
-
-	if len(lines) == 0 {
-		return DetectionResult{}, false
-	}
-
 	var patternMatches, errorMatches uint32
 	var nonEmptyLines uint32
-	for _, line := range lines {
-		if strings.TrimSpace(line) == "" {
-			continue
+
+	forEachLine(text, 200, func(line string) {
+		if isAllWhitespace(line) {
+			return
 		}
 		nonEmptyLines++
 		for i, pattern := range logPatterns {
@@ -374,7 +552,7 @@ func tryDetectLog(text string) (DetectionResult, bool) {
 				break
 			}
 		}
-	}
+	})
 
 	if patternMatches == 0 || nonEmptyLines == 0 {
 		return DetectionResult{}, false
@@ -398,25 +576,20 @@ func tryDetectLog(text string) (DetectionResult, bool) {
 }
 
 func tryDetectCode(text string) (DetectionResult, bool) {
-	lines := strings.Split(text, "\n")
-	limit := len(lines)
-	if limit > 100 {
-		limit = 100
-	}
-	lines = lines[:limit]
-
-	if len(lines) == 0 {
-		return DetectionResult{}, false
-	}
-
 	// Track scores in first-match insertion order (matching Python dict semantics).
 	type langScore struct {
 		name  string
 		score uint32
 	}
 	var languageScores []langScore
+	var nonEmptyLines uint32
 
-	for _, line := range lines {
+	forEachLine(text, 100, func(line string) {
+		if isAllWhitespace(line) {
+			return // skip but still count below
+		}
+		nonEmptyLines++
+
 		for _, cl := range codeLanguages {
 			matched := false
 			for _, pattern := range cl.patterns {
@@ -440,7 +613,7 @@ func tryDetectCode(text string) (DetectionResult, bool) {
 				break
 			}
 		}
-	}
+	})
 
 	if len(languageScores) == 0 {
 		return DetectionResult{}, false
@@ -460,12 +633,6 @@ func tryDetectCode(text string) (DetectionResult, bool) {
 		return DetectionResult{}, false
 	}
 
-	var nonEmptyLines uint32
-	for _, line := range lines {
-		if strings.TrimSpace(line) != "" {
-			nonEmptyLines++
-		}
-	}
 	if nonEmptyLines == 0 {
 		nonEmptyLines = 1
 	}

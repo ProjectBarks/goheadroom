@@ -19,6 +19,7 @@ import (
 	"math"
 	"math/bits"
 	"strings"
+	"unicode/utf8"
 )
 
 // ComputeOptimalK computes the optimal number of items to keep via
@@ -130,7 +131,7 @@ func FindKnee(curve []int) *int {
 // running count of unique bigrams after seeing items[0..k].
 func ComputeUniqueBigramCurve(items []string) []int {
 	type bigram struct{ a, b string }
-	seen := make(map[bigram]struct{})
+	seen := make(map[bigram]struct{}, len(items)*2)
 	curve := make([]int, 0, len(items))
 
 	for _, item := range items {
@@ -173,15 +174,22 @@ func Simhash(text string) uint64 {
 	}
 
 	var votes [64]int32
+	// Reusable buffer for encoding rune grams to bytes -- avoids
+	// string(chars[i:end]) + []byte(gram) allocations per window.
+	var buf [16]byte // 4 runes * up to 4 bytes each
 
 	for i := 0; i < iterCount; i++ {
 		end := i + 4
 		if end > n {
 			end = n
 		}
-		gram := string(chars[i:end])
+		// Encode runes directly into buf, no intermediate string.
+		off := 0
+		for _, r := range chars[i:end] {
+			off += utf8.EncodeRune(buf[off:], r)
+		}
 
-		digest := md5.Sum([]byte(gram))
+		digest := md5.Sum(buf[:off])
 		h := binary.BigEndian.Uint64(digest[:8])
 
 		for j := range 64 {
@@ -221,11 +229,13 @@ func CountUniqueSimhash(items []string, threshold int) int {
 		fingerprints[i] = Simhash(s)
 	}
 
-	var clusters []uint64
+	// Pre-allocate clusters with a reasonable initial capacity to
+	// avoid repeated slice growth.
+	clusters := make([]uint64, 0, min(len(items), 32))
 	for _, fp := range fingerprints {
 		matched := false
 		for _, rep := range clusters {
-			if HammingDistance(fp, rep) <= threshold {
+			if bits.OnesCount64(fp^rep) <= threshold {
 				matched = true
 				break
 			}
