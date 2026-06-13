@@ -49,7 +49,7 @@ func (t *TiktokenCounter) CountText(text string) int {
 	if text == "" {
 		return 0
 	}
-	return len(t.enc.Encode(text, nil, nil))
+	return len(t.enc.EncodeOrdinary(text))
 }
 
 func (t *TiktokenCounter) Backend() Backend    { return BackendTiktoken }

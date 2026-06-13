@@ -294,14 +294,15 @@ func detectFormatLines(lines []string) LogFormat {
 	for _, fp := range formatPatterns {
 		score := 0
 		for i := 0; i < sampleN; i++ {
+			line := lines[i]
 			for _, pat := range fp.patterns {
-				if strings.Contains(lines[i], pat) {
+				if len(pat) <= len(line) && strings.Contains(line, pat) {
 					score++
 					break
 				}
 			}
 		}
-		if score > 0 && score > bestScore {
+		if score > bestScore {
 			bestScore = score
 			bestFormat = fp.format
 		}
@@ -319,38 +320,61 @@ func DetectFormat(lines []string) LogFormat {
 
 // ── Level classification ────────────────────────────────────────────
 
-var levelPatterns = []struct {
-	level    LogLevel
-	patterns []string
-}{
-	{LogLevelError, []string{"ERROR", "error", "Error", "FATAL", "fatal", "Fatal", "CRITICAL", "critical"}},
-	{LogLevelFail, []string{"FAIL", "FAILED", "fail", "failed", "Fail", "Failed"}},
-	{LogLevelWarn, []string{"WARN", "WARNING", "warn", "warning", "Warn", "Warning"}},
-	{LogLevelInfo, []string{"INFO", "info", "Info"}},
-	{LogLevelDebug, []string{"DEBUG", "debug", "Debug"}},
-	{LogLevelTrace, []string{"TRACE", "trace", "Trace"}},
-}
-
 func classifyLevel(line string) LogLevel {
-	for _, lp := range levelPatterns {
-		for _, pat := range lp.patterns {
-			idx := strings.Index(line, pat)
-			if idx < 0 {
-				continue
-			}
-			// Word boundary check.
-			if isWordBoundary(line, idx, idx+len(pat)) {
-				return lp.level
-			}
-		}
+	if containsWordFold(line, "ERROR") || containsWordFold(line, "FATAL") || containsWordFold(line, "CRITICAL") {
+		return LogLevelError
+	}
+	if containsWordFold(line, "FAILED") || containsWordFold(line, "FAIL") {
+		return LogLevelFail
+	}
+	if containsWordFold(line, "WARNING") || containsWordFold(line, "WARN") {
+		return LogLevelWarn
+	}
+	if containsWordFold(line, "INFO") {
+		return LogLevelInfo
+	}
+	if containsWordFold(line, "DEBUG") {
+		return LogLevelDebug
+	}
+	if containsWordFold(line, "TRACE") {
+		return LogLevelTrace
 	}
 	return LogLevelUnknown
 }
 
-func isWordBoundary(s string, start, end int) bool {
-	leftOK := start == 0 || !textutil.IsWordChar(s[start-1])
-	rightOK := end == len(s) || !textutil.IsWordChar(s[end])
-	return leftOK && rightOK
+func containsWordFold(line, keyword string) bool {
+	kLen := len(keyword)
+	n := len(line)
+	first := keyword[0]
+	firstLo := first | 0x20
+	for i := 0; i <= n-kLen; i++ {
+		c := line[i]
+		if c|0x20 != firstLo {
+			continue
+		}
+		if i > 0 && isWordCharByte(line[i-1]) {
+			continue
+		}
+		end := i + kLen
+		if end < n && isWordCharByte(line[end]) {
+			continue
+		}
+		match := true
+		for j := 1; j < kLen; j++ {
+			if line[i+j]|0x20 != keyword[j]|0x20 {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func isWordCharByte(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
 // ── Stack trace detection ───────────────────────────────────────────
@@ -494,48 +518,81 @@ func traceTerminates(flavor traceFlavor, line string) bool {
 // ── Summary detection ───────────────────────────────────────────────
 
 func isSummaryLine(line string) bool {
-	if strings.HasPrefix(line, "===") || strings.HasPrefix(line, "---") {
+	if len(line) < 3 {
+		return false
+	}
+	c0 := line[0]
+	if c0 == '=' && line[1] == '=' && line[2] == '=' {
 		return true
 	}
-	// Digit-prefixed summary.
-	leadingDigits := 0
-	for _, b := range line {
-		if b >= '0' && b <= '9' {
-			leadingDigits++
-		} else {
-			break
-		}
+	if c0 == '-' && line[1] == '-' && line[2] == '-' {
+		return true
 	}
-	if leadingDigits > 0 && leadingDigits < len(line) && line[leadingDigits] == ' ' {
-		rest := line[leadingDigits+1:]
-		for _, kw := range []string{"passed", "failed", "skipped", "error", "warning"} {
-			if strings.HasPrefix(rest, kw) {
+	if c0 >= '0' && c0 <= '9' {
+		i := 1
+		for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+			i++
+		}
+		if i < len(line) && line[i] == ' ' {
+			rest := line[i+1:]
+			if strings.HasPrefix(rest, "passed") || strings.HasPrefix(rest, "failed") ||
+				strings.HasPrefix(rest, "skipped") || strings.HasPrefix(rest, "error") ||
+				strings.HasPrefix(rest, "warning") {
 				return true
 			}
 		}
 	}
-	// Test/Suite prefix.
-	for _, prefix := range []string{"Test ", "Tests ", "Tests:", "Test:", "Suite ", "Suites ", "Suites:", "Suite:"} {
-		if rest, ok := strings.CutPrefix(line, prefix); ok {
-			for _, c := range rest {
-				if c == ' ' || c == '\t' {
-					continue
-				}
-				return c >= '0' && c <= '9'
+	if c0 == 'T' {
+		if rest, ok := strings.CutPrefix(line, "Tests"); ok {
+			if isSummaryTestSuffix(rest) {
+				return true
 			}
 		}
-	}
-	for _, prefix := range []string{"TOTAL", "Total", "Summary"} {
-		if strings.HasPrefix(line, prefix) {
+		if rest, ok := strings.CutPrefix(line, "Test"); ok {
+			if isSummaryTestSuffix(rest) {
+				return true
+			}
+			return strings.Contains(line, "succeeded") || strings.Contains(line, "failed") || strings.Contains(line, "complete")
+		}
+		if strings.HasPrefix(line, "TOTAL") || strings.HasPrefix(line, "Total") {
 			return true
 		}
+		return false
 	}
-	for _, prefix := range []string{"Build", "Compile", "Test"} {
-		if strings.HasPrefix(line, prefix) {
-			for _, outcome := range []string{"succeeded", "failed", "complete"} {
-				if strings.Contains(line, outcome) {
-					return true
-				}
+	if c0 == 'S' {
+		if rest, ok := strings.CutPrefix(line, "Suites"); ok {
+			if isSummaryTestSuffix(rest) {
+				return true
+			}
+		}
+		if rest, ok := strings.CutPrefix(line, "Suite"); ok {
+			if isSummaryTestSuffix(rest) {
+				return true
+			}
+		}
+		if strings.HasPrefix(line, "Summary") {
+			return true
+		}
+		return false
+	}
+	if c0 == 'B' && strings.HasPrefix(line, "Build") {
+		return strings.Contains(line, "succeeded") || strings.Contains(line, "failed") || strings.Contains(line, "complete")
+	}
+	if c0 == 'C' && strings.HasPrefix(line, "Compile") {
+		return strings.Contains(line, "succeeded") || strings.Contains(line, "failed") || strings.Contains(line, "complete")
+	}
+	return false
+}
+
+func isSummaryTestSuffix(rest string) bool {
+	if len(rest) == 0 {
+		return false
+	}
+	if rest[0] == ':' || rest[0] == ' ' {
+		for i := 1; i < len(rest); i++ {
+			c := rest[i]
+			if c != ' ' && c != '\t' {
+				return c >= '0' && c <= '9'
 			}
 		}
 	}

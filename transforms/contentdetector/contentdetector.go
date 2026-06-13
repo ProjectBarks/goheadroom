@@ -8,7 +8,6 @@ package contentdetector
 
 import (
 	"math"
-	"regexp"
 	"strings"
 
 	"github.com/uber/goheadroom/internal/textutil"
@@ -60,10 +59,132 @@ func plainTextResult(confidence float64) DetectionResult {
 	return DetectionResult{ContentType: PlainText, Confidence: confidence}
 }
 
-// Regex patterns (compiled once) - kept only for complex patterns not worth hand-rolling.
-var (
-	diffHeaderPattern = regexp.MustCompile(`^(diff --git|diff --combined |diff --cc |--- a/|@@\s+-\d+,\d+\s+\+\d+,\d+\s+@@|@@@+\s+-\d+(?:,\d+)?\s+(?:-\d+(?:,\d+)?\s+)+\+\d+(?:,\d+)?\s+@@@+)`)
-)
+func matchesDiffHeader(line string) bool {
+	if strings.HasPrefix(line, "diff --git ") {
+		return true
+	}
+	if strings.HasPrefix(line, "diff --combined ") {
+		return true
+	}
+	if strings.HasPrefix(line, "diff --cc ") {
+		return true
+	}
+	if strings.HasPrefix(line, "--- a/") {
+		return true
+	}
+	if len(line) >= 2 && line[0] == '@' && line[1] == '@' {
+		return matchesHunkHeader(line)
+	}
+	return false
+}
+
+func matchesHunkHeader(line string) bool {
+	i := 2
+	for i < len(line) && (line[i] == '@') {
+		i++
+	}
+	atCount := i
+
+	if i >= len(line) || (line[i] != ' ' && line[i] != '\t') {
+		return false
+	}
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+
+	if atCount == 2 {
+		i = skipHunkRange(line, i, '-')
+		if i < 0 {
+			return false
+		}
+		i = skipHunkRange(line, i, '+')
+		if i < 0 {
+			return false
+		}
+	} else {
+		if i >= len(line) || line[i] != '-' {
+			return false
+		}
+		i = skipOptionalRange(line, i)
+		if i < 0 {
+			return false
+		}
+
+		for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+			i++
+		}
+		for i < len(line) && line[i] == '-' {
+			i = skipOptionalRange(line, i)
+			if i < 0 {
+				return false
+			}
+			for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+				i++
+			}
+		}
+
+		if i >= len(line) || line[i] != '+' {
+			return false
+		}
+		i = skipOptionalRange(line, i)
+		if i < 0 {
+			return false
+		}
+	}
+
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+
+	closing := line[i:]
+	return strings.HasPrefix(closing, strings.Repeat("@", atCount))
+}
+
+func skipHunkRange(line string, i int, prefix byte) int {
+	if i >= len(line) || line[i] != prefix {
+		return -1
+	}
+	i++
+	if i >= len(line) || line[i] < '0' || line[i] > '9' {
+		return -1
+	}
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i < len(line) && line[i] == ',' {
+		i++
+		if i >= len(line) || line[i] < '0' || line[i] > '9' {
+			return -1
+		}
+		for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+			i++
+		}
+	}
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	return i
+}
+
+func skipOptionalRange(line string, i int) int {
+	i++
+	if i >= len(line) || line[i] < '0' || line[i] > '9' {
+		return -1
+	}
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	if i < len(line) && line[i] == ',' {
+		i++
+		if i >= len(line) || line[i] < '0' || line[i] > '9' {
+			return -1
+		}
+		for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+			i++
+		}
+	}
+	return i
+}
 
 // matchesSearchResult replaces searchResultPattern `^[^\s:]+:\d+:`
 // Scans for non-space non-colon chars, then ':', then digits, then ':'.
@@ -193,55 +314,6 @@ func countHTMLStructuralTags(s string) uint32 {
 	return count
 }
 
-
-// indexWordFoldASCII finds kw in s case-insensitively with word-boundary checks.
-// kw must be pre-lowercased ASCII. Returns index of match or -1.
-// Zero-allocation: folds case inline via byte arithmetic.
-func indexWordFoldASCII(s, kw string) int {
-	kwLen := len(kw)
-	if kwLen == 0 || len(s) < kwLen {
-		return -1
-	}
-	kw0 := kw[0]
-	limit := len(s) - kwLen
-	for i := 0; i <= limit; i++ {
-		// Quick check: first char with inline case fold
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		if c != kw0 {
-			continue
-		}
-
-		// Match remaining chars
-		match := true
-		for j := 1; j < kwLen; j++ {
-			c := s[i+j]
-			if c >= 'A' && c <= 'Z' {
-				c += 32
-			}
-			if c != kw[j] {
-				match = false
-				break
-			}
-		}
-		if !match {
-			continue
-		}
-
-		// Word boundary checks
-		if i > 0 && textutil.IsWordChar(s[i-1]) {
-			continue
-		}
-		end := i + kwLen
-		if end < len(s) && textutil.IsWordChar(s[end]) {
-			continue
-		}
-		return i
-	}
-	return -1
-}
 
 // ---------------------------------------------------------------------------
 // Language matchers (replace []*regexp.Regexp with func(line string) bool)
@@ -836,7 +908,7 @@ func tryDetectDiff(text string) (DetectionResult, bool) {
 			line = remaining[:idx]
 			remaining = remaining[idx+1:]
 		}
-		if diffHeaderPattern.MatchString(line) {
+		if matchesDiffHeader(line) {
 			headerMatches++
 		}
 		if matchesDiffChange(line) {

@@ -369,37 +369,25 @@ func (s *jsonScanner) parseArray() (*keyOrderNode, error) {
 	// Parse only the first element fully (to capture representative key order).
 	// Skip remaining elements since array items after crushing won't match
 	// original indices anyway, and homogeneous arrays share the same key order.
-	first := true
-	for {
-		if first {
-			child, err := s.parseNode()
-			if err != nil {
-				return nil, err
-			}
-			node.items = append(node.items, child)
-			first = false
-		} else {
-			// Skip subsequent elements without building key-order nodes.
-			s.skipWhitespace()
-			if s.pos >= len(s.data) {
-				return nil, fmt.Errorf("unexpected end of JSON in array")
-			}
-			switch s.data[s.pos] {
-			case '{':
-				if err := s.skipObject(); err != nil {
-					return nil, err
-				}
-			case '[':
-				if err := s.skipArray(); err != nil {
-					return nil, err
-				}
-			default:
-				if err := s.skipValue(); err != nil {
-					return nil, err
-				}
-			}
-		}
+	child, err := s.parseNode()
+	if err != nil {
+		return nil, err
+	}
+	node.items = append(node.items, child)
+	s.skipWhitespace()
+	if s.pos < len(s.data) && s.data[s.pos] == ']' {
+		s.pos++
+		return node, nil
+	}
+	if s.pos >= len(s.data) || s.data[s.pos] != ',' {
+		return nil, fmt.Errorf("expected ',' or ']' in array at pos %d", s.pos)
+	}
+	s.pos++
 
+	for {
+		if err := s.skipValue(); err != nil {
+			return nil, err
+		}
 		s.skipWhitespace()
 		if s.pos >= len(s.data) {
 			return nil, fmt.Errorf("unexpected end of JSON in array")
@@ -552,24 +540,8 @@ func (s *jsonScanner) skipObject() error {
 			return fmt.Errorf("expected ':' in object")
 		}
 		s.pos++ // consume ':'
-		// Skip value
-		s.skipWhitespace()
-		if s.pos >= len(s.data) {
-			return fmt.Errorf("unexpected end of object")
-		}
-		switch s.data[s.pos] {
-		case '{':
-			if err := s.skipObject(); err != nil {
-				return err
-			}
-		case '[':
-			if err := s.skipArray(); err != nil {
-				return err
-			}
-		default:
-			if err := s.skipValue(); err != nil {
-				return err
-			}
+		if err := s.skipValue(); err != nil {
+			return err
 		}
 		s.skipWhitespace()
 		if s.pos >= len(s.data) {
@@ -595,23 +567,8 @@ func (s *jsonScanner) skipArray() error {
 		return nil
 	}
 	for {
-		s.skipWhitespace()
-		if s.pos >= len(s.data) {
-			return fmt.Errorf("unexpected end of array")
-		}
-		switch s.data[s.pos] {
-		case '{':
-			if err := s.skipObject(); err != nil {
-				return err
-			}
-		case '[':
-			if err := s.skipArray(); err != nil {
-				return err
-			}
-		default:
-			if err := s.skipValue(); err != nil {
-				return err
-			}
+		if err := s.skipValue(); err != nil {
+			return err
 		}
 		s.skipWhitespace()
 		if s.pos >= len(s.data) {

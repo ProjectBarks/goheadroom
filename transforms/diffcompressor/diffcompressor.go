@@ -8,7 +8,6 @@ package diffcompressor
 import (
 	"crypto/md5"
 	"encoding/hex"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -363,32 +362,203 @@ func (f *diffFile) totalDeletions() int {
 	return sum
 }
 
-// ── Regex helpers ───────────────────────────────────────────────────
+// ── Diff-line matchers (no regexp) ──────────────────────────────────
 
-var (
-	hunkHeaderRe    = regexp.MustCompile(`^(?:@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@|@@@ -\d+(?:,\d+)? -\d+(?:,\d+)? \+\d+(?:,\d+)? @@@|@@@@ -\d+(?:,\d+)? -\d+(?:,\d+)? -\d+(?:,\d+)? \+\d+(?:,\d+)? @@@@)(.*)$`)
-	hunkNewRangeRe  = regexp.MustCompile(`\+(\d+)`)
-	diffGitRe       = regexp.MustCompile(`^diff --git a/(.+) b/(.+)$`)
-	diffCombinedRe  = regexp.MustCompile(`^diff --combined (.+)$`)
-	diffCCRe        = regexp.MustCompile(`^diff --cc (.+)$`)
-	oldFileRe       = regexp.MustCompile(`^--- (a/(.+)|/dev/null)$`)
-	newFileRe       = regexp.MustCompile(`^\+\+\+ (b/(.+)|/dev/null)$`)
-	binaryRe        = regexp.MustCompile(`^Binary files .+ differ$`)
+func isDigit(c byte) bool {
+	return c >= '0' && c <= '9'
+}
 
-	priorityKeywords = [][]string{
-		{"error", "exception", "failed", "failure", "fail", "fatal", "critical", "crash", "panic"},
-		{"important", "note", "todo", "fixme", "hack", "xxx", "bug", "fix"},
-		{"security", "auth", "password", "secret", "token"},
+func skipDigits(s string, i int) int {
+	for i < len(s) && isDigit(s[i]) {
+		i++
 	}
-)
+	return i
+}
+
+func skipRange(s string, i int) (int, bool) {
+	if i >= len(s) || s[i] != '-' {
+		return i, false
+	}
+	i++
+	j := skipDigits(s, i)
+	if j == i {
+		return i, false
+	}
+	i = j
+	if i < len(s) && s[i] == ',' {
+		i++
+		j = skipDigits(s, i)
+		if j == i {
+			return i, false
+		}
+		i = j
+	}
+	return i, true
+}
+
+func skipPlusRange(s string, i int) (int, bool) {
+	if i >= len(s) || s[i] != '+' {
+		return i, false
+	}
+	i++
+	j := skipDigits(s, i)
+	if j == i {
+		return i, false
+	}
+	i = j
+	if i < len(s) && s[i] == ',' {
+		i++
+		j = skipDigits(s, i)
+		if j == i {
+			return i, false
+		}
+		i = j
+	}
+	return i, true
+}
+
+func matchHunkHeader(line string) bool {
+	if len(line) < 5 || line[0] != '@' || line[1] != '@' {
+		return false
+	}
+
+	if line[2] == ' ' {
+		i := 3
+		var ok bool
+		i, ok = skipRange(line, i)
+		if !ok {
+			return false
+		}
+		if i >= len(line) || line[i] != ' ' {
+			return false
+		}
+		i++
+		i, ok = skipPlusRange(line, i)
+		if !ok {
+			return false
+		}
+		if i >= len(line) || line[i] != ' ' {
+			return false
+		}
+		i++
+		if i+1 >= len(line) || line[i] != '@' || line[i+1] != '@' {
+			return false
+		}
+		return true
+	}
+
+	if len(line) >= 6 && line[2] == '@' && line[3] == ' ' {
+		i := 4
+		var ok bool
+		i, ok = skipRange(line, i)
+		if !ok {
+			return false
+		}
+		if i >= len(line) || line[i] != ' ' {
+			return false
+		}
+		i++
+		i, ok = skipRange(line, i)
+		if !ok {
+			return false
+		}
+		if i >= len(line) || line[i] != ' ' {
+			return false
+		}
+		i++
+		i, ok = skipPlusRange(line, i)
+		if !ok {
+			return false
+		}
+		if i >= len(line) || line[i] != ' ' {
+			return false
+		}
+		i++
+		if i+2 >= len(line) || line[i] != '@' || line[i+1] != '@' || line[i+2] != '@' {
+			return false
+		}
+		return true
+	}
+
+	if len(line) >= 7 && line[2] == '@' && line[3] == '@' && line[4] == ' ' {
+		i := 5
+		var ok bool
+		i, ok = skipRange(line, i)
+		if !ok {
+			return false
+		}
+		if i >= len(line) || line[i] != ' ' {
+			return false
+		}
+		i++
+		i, ok = skipRange(line, i)
+		if !ok {
+			return false
+		}
+		if i >= len(line) || line[i] != ' ' {
+			return false
+		}
+		i++
+		i, ok = skipRange(line, i)
+		if !ok {
+			return false
+		}
+		if i >= len(line) || line[i] != ' ' {
+			return false
+		}
+		i++
+		i, ok = skipPlusRange(line, i)
+		if !ok {
+			return false
+		}
+		if i >= len(line) || line[i] != ' ' {
+			return false
+		}
+		i++
+		if i+3 >= len(line) || line[i] != '@' || line[i+1] != '@' || line[i+2] != '@' || line[i+3] != '@' {
+			return false
+		}
+		return true
+	}
+
+	return false
+}
+
+func matchDiffGit(line string) bool {
+	return strings.HasPrefix(line, "diff --git a/") && strings.Contains(line[13:], " b/")
+}
+
+func matchDiffCombined(line string) bool {
+	return strings.HasPrefix(line, "diff --combined ") && len(line) > 16
+}
+
+func matchDiffCC(line string) bool {
+	return strings.HasPrefix(line, "diff --cc ") && len(line) > 10
+}
+
+func matchOldFile(line string) bool {
+	return line == "--- /dev/null" || (strings.HasPrefix(line, "--- a/") && len(line) > 6)
+}
+
+func matchNewFile(line string) bool {
+	return line == "+++ /dev/null" || (strings.HasPrefix(line, "+++ b/") && len(line) > 6)
+}
+
+func matchBinary(line string) bool {
+	return strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, " differ") && len(line) > 20
+}
+
+var priorityKeywords = [][]string{
+	{"error", "exception", "failed", "failure", "fail", "fatal", "critical", "crash", "panic"},
+	{"important", "note", "todo", "fixme", "hack", "xxx", "bug", "fix"},
+	{"security", "auth", "password", "secret", "token"},
+}
 
 func isDiffHeader(line string) bool {
-	// All diff headers start with "diff --". Quick prefix check avoids
-	// regex engine overhead for the vast majority of lines.
 	if len(line) < 11 || line[0] != 'd' || line[4] != ' ' || line[5] != '-' || line[6] != '-' {
 		return false
 	}
-	return diffGitRe.MatchString(line) || diffCombinedRe.MatchString(line) || diffCCRe.MatchString(line)
+	return matchDiffGit(line) || matchDiffCombined(line) || matchDiffCC(line)
 }
 
 // ── Parser ──────────────────────────────────────────────────────────
@@ -462,7 +632,7 @@ func parseDiff(li *textutil.LineIndex) *parsedDiff {
 			continue
 		}
 
-		if lineLen > 0 && line[0] == '@' && hunkHeaderRe.MatchString(line) {
+		if lineLen > 0 && line[0] == '@' && matchHunkHeader(line) {
 			if currentHunk != nil {
 				currentFile.hunks = append(currentFile.hunks, currentHunk)
 			}
@@ -475,12 +645,12 @@ func parseDiff(li *textutil.LineIndex) *parsedDiff {
 			continue
 		}
 
-		if lineLen > 3 && line[0] == '-' && line[1] == '-' && line[2] == '-' && oldFileRe.MatchString(line) {
+		if lineLen > 3 && line[0] == '-' && line[1] == '-' && line[2] == '-' && matchOldFile(line) {
 			currentFile.oldFile = line
 			continue
 		}
 
-		if lineLen > 3 && line[0] == '+' && line[1] == '+' && line[2] == '+' && newFileRe.MatchString(line) {
+		if lineLen > 3 && line[0] == '+' && line[1] == '+' && line[2] == '+' && matchNewFile(line) {
 			currentFile.newFile = line
 			continue
 		}
@@ -518,7 +688,7 @@ func parseDiff(li *textutil.LineIndex) *parsedDiff {
 					currentFile.renameLines = append(currentFile.renameLines, line)
 				}
 			case 'B':
-				if binaryRe.MatchString(line) {
+				if matchBinary(line) {
 					currentFile.isBinary = true
 					s := line
 					currentFile.originalBinaryLine = &s
@@ -599,50 +769,6 @@ func hunkMatchesPriorityH(h *diffHunk) bool {
 		}
 	}
 	return false
-}
-
-// indexWordFoldASCII finds the first occurrence of kw in s as a whole word,
-// using ASCII case-folding. kw must be lowercase. Returns -1 if not found.
-func indexWordFoldASCII(s, kw string) int {
-	kwLen := len(kw)
-	for i := 0; i <= len(s)-kwLen; i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		if c != kw[0] {
-			continue
-		}
-		match := true
-		for j := 1; j < kwLen; j++ {
-			c := s[i+j]
-			if c >= 'A' && c <= 'Z' {
-				c += 32
-			}
-			if c != kw[j] {
-				match = false
-				break
-			}
-		}
-		if !match {
-			continue
-		}
-		if i > 0 {
-			b := s[i-1]
-			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' {
-				continue
-			}
-		}
-		end := i + kwLen
-		if end < len(s) {
-			b := s[end]
-			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' {
-				continue
-			}
-		}
-		return i
-	}
-	return -1
 }
 
 func scoreHunks(files []*diffFile, context string) {
@@ -767,12 +893,20 @@ func selectHunks(hunks []*diffHunk, maxPerFile int) ([]*diffHunk, []*diffHunk) {
 }
 
 func extractLineNumber(header string) int {
-	m := hunkNewRangeRe.FindStringSubmatch(header)
-	if m != nil {
-		n, _ := strconv.Atoi(m[1])
-		return n
+	i := strings.IndexByte(header, '+')
+	if i < 0 {
+		return 0
 	}
-	return 0
+	i++
+	j := i
+	for j < len(header) && isDigit(header[j]) {
+		j++
+	}
+	if j == i {
+		return 0
+	}
+	n, _ := strconv.Atoi(header[i:j])
+	return n
 }
 
 // ── Context trimming ────────────────────────────────────────────────

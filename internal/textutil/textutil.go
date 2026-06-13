@@ -182,3 +182,46 @@ func IsAllWhitespace(s string) bool {
 	}
 	return true
 }
+
+func IndexWordFoldASCII(s, kw string) int {
+	kwLen := len(kw)
+	if kwLen == 0 || len(s) < kwLen {
+		return -1
+	}
+	kw0 := kw[0]
+	limit := len(s) - kwLen
+	for i := 0; i <= limit; i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		if c != kw0 {
+			continue
+		}
+
+		match := true
+		for j := 1; j < kwLen; j++ {
+			c := s[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 32
+			}
+			if c != kw[j] {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+
+		if i > 0 && IsWordChar(s[i-1]) {
+			continue
+		}
+		end := i + kwLen
+		if end < len(s) && IsWordChar(s[end]) {
+			continue
+		}
+		return i
+	}
+	return -1
+}

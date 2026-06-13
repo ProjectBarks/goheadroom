@@ -136,15 +136,17 @@ func (sc *SmartCrusher) processArray(v []interface{}, precomputedRaw []json.RawM
 	n := len(v)
 	if n >= sc.Config.MinItemsToAnalyze {
 		arrType := classifyInterfaceArray(v)
-		switch arrType {
-		case ArrayDictArray:
-			var rawItems []json.RawMessage
-			if precomputedRaw != nil {
-				rawItems = precomputedRaw
-			} else {
+		rawItems := precomputedRaw
+		ensureRaw := func() []json.RawMessage {
+			if rawItems == nil {
 				rawItems = interfaceToRawMessages(v)
 			}
-			result := sc.CrushArrayWithParsed(rawItems, v, queryContext, bias)
+			return rawItems
+		}
+
+		switch arrType {
+		case ArrayDictArray:
+			result := sc.CrushArrayWithParsed(ensureRaw(), v, queryContext, bias)
 			if result.Compacted != nil {
 				infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->len="+strconv.Itoa(len(*result.Compacted))+")")
 				return *result.Compacted, strings.Join(infoParts, ",")
@@ -176,13 +178,7 @@ func (sc *SmartCrusher) processArray(v []interface{}, precomputedRaw []json.RawM
 			return result, strings.Join(infoParts, ",")
 
 		case ArrayNumberArray:
-			var rawItems []json.RawMessage
-			if precomputedRaw != nil {
-				rawItems = precomputedRaw
-			} else {
-				rawItems = interfaceToRawMessages(v)
-			}
-			keptIndices, strategy := crushNumberArrayIndices(rawItems, &sc.Config, bias)
+			keptIndices, strategy := crushNumberArrayIndices(ensureRaw(), &sc.Config, bias)
 			infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(keptIndices))+")")
 			kept := make([]interface{}, len(keptIndices))
 			for i, idx := range keptIndices {
@@ -191,13 +187,7 @@ func (sc *SmartCrusher) processArray(v []interface{}, precomputedRaw []json.RawM
 			return kept, strings.Join(infoParts, ",")
 
 		case ArrayMixedArray:
-			var rawItems []json.RawMessage
-			if precomputedRaw != nil {
-				rawItems = precomputedRaw
-			} else {
-				rawItems = interfaceToRawMessages(v)
-			}
-			keptIndices, strategy := sc.crushMixedArrayIndices(rawItems, v, queryContext, bias)
+			keptIndices, strategy := sc.crushMixedArrayIndices(ensureRaw(), v, queryContext, bias)
 			infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(keptIndices))+")")
 			kept := make([]interface{}, len(keptIndices))
 			for i, idx := range keptIndices {
@@ -354,139 +344,12 @@ func (sc *SmartCrusher) CrushArrayWithParsed(items []json.RawMessage, parsedItem
 }
 
 // CrushMixedArray compresses a mixed-type array.
-// Port of Rust crush_mixed_array.
 func (sc *SmartCrusher) CrushMixedArray(items []json.RawMessage, queryContext string, bias float64) ([]json.RawMessage, string) {
-	n := len(items)
-	if n <= 8 {
-		result := make([]json.RawMessage, n)
-		copy(result, items)
-		return result, "mixed:passthrough"
-	}
-
-	// Group by type.
-	type group struct {
-		key     string
-		indices []int
-		values  []json.RawMessage
-	}
-	var groups []group
-	groupIndex := make(map[string]int)
-
-	for i, raw := range items {
-		key := groupKey(raw)
-		if idx, ok := groupIndex[key]; ok {
-			groups[idx].indices = append(groups[idx].indices, i)
-			groups[idx].values = append(groups[idx].values, raw)
-		} else {
-			groupIndex[key] = len(groups)
-			groups = append(groups, group{key: key, indices: []int{i}, values: []json.RawMessage{raw}})
-		}
-	}
-
-	keepIndices := make(map[int]bool)
-	var strategyParts []string
-
-	for _, g := range groups {
-		if len(g.values) < sc.Config.MinItemsToAnalyze {
-			for _, idx := range g.indices {
-				keepIndices[idx] = true
-			}
-			continue
-		}
-
-		switch g.key {
-		case "dict":
-			result := sc.CrushArray(g.values, queryContext, bias)
-			crushedKeys := make(map[string]bool)
-			for _, raw := range result.Items {
-				crushedKeys[string(raw)] = true
-			}
-			for i, idx := range g.indices {
-				if crushedKeys[string(g.values[i])] {
-					keepIndices[idx] = true
-				}
-			}
-			strategyParts = append(strategyParts, "dict:"+strconv.Itoa(len(g.values))+"->"+strconv.Itoa(len(result.Items)))
-
-		case "str":
-			strs := make([]string, 0, len(g.values))
-			for _, raw := range g.values {
-				var s string
-				if err := json.Unmarshal(raw, &s); err == nil {
-					strs = append(strs, s)
-				}
-			}
-			crushed, _ := CrushStringArray(strs, &sc.Config, bias)
-			crushedSet := make(map[string]bool)
-			for _, s := range crushed {
-				crushedSet[s] = true
-			}
-			for i, idx := range g.indices {
-				var s string
-				if err := json.Unmarshal(g.values[i], &s); err == nil && crushedSet[s] {
-					keepIndices[idx] = true
-				}
-			}
-			strategyParts = append(strategyParts, "str:"+strconv.Itoa(len(g.values))+"->"+strconv.Itoa(len(crushed)))
-
-		case "number":
-			strItems := make([]string, len(g.values))
-			for i, raw := range g.values {
-				strItems[i] = string(raw)
-			}
-			_, kFirst, kLast, _ := ComputeKSplit(strItems, &sc.Config, bias)
-			kFirst = min(kFirst, len(g.values))
-			kLast = min(kLast, len(g.values)-kFirst)
-			for i := 0; i < kFirst; i++ {
-				keepIndices[g.indices[i]] = true
-			}
-			for i := len(g.indices) - kLast; i < len(g.indices); i++ {
-				if i >= 0 {
-					keepIndices[g.indices[i]] = true
-				}
-			}
-
-			// Outliers via finite-only stats (matches Rust crush_mixed_array).
-			var finite []float64
-			for _, raw := range g.values {
-				var num float64
-				if err := json.Unmarshal(raw, &num); err == nil && !math.IsInf(num, 0) && !math.IsNaN(num) {
-					finite = append(finite, num)
-				}
-			}
-			if len(finite) > 1 {
-				if meanV, ok := Mean(finite); ok {
-					if stdV, ok := SampleStdev(finite); ok && stdV > 0 {
-						threshold := sc.Config.VarianceThreshold * stdV
-						for i, raw := range g.values {
-							var num float64
-							if err := json.Unmarshal(raw, &num); err == nil && !math.IsInf(num, 0) && !math.IsNaN(num) {
-								if math.Abs(num-meanV) > threshold {
-									keepIndices[g.indices[i]] = true
-								}
-							}
-						}
-					}
-				}
-			}
-			strategyParts = append(strategyParts, "num:"+strconv.Itoa(len(g.values)))
-
-		default:
-			// list / bool / none / other: keep all items.
-			for _, idx := range g.indices {
-				keepIndices[idx] = true
-			}
-		}
-	}
-
-	// Reassemble in original order.
-	sorted := setToSortedSlice(keepIndices)
-	result := make([]json.RawMessage, len(sorted))
-	for i, idx := range sorted {
+	indices, strategy := sc.crushMixedArrayIndices(items, nil, queryContext, bias)
+	result := make([]json.RawMessage, len(indices))
+	for i, idx := range indices {
 		result[i] = items[idx]
 	}
-
-	strategy := "mixed:adaptive(" + strconv.Itoa(n) + "->" + strconv.Itoa(len(result)) + "," + strings.Join(strategyParts, ",") + ")"
 	return result, strategy
 }
 
@@ -497,54 +360,45 @@ func classifyInterfaceArray(items []interface{}) ArrayType {
 		return ArrayEmpty
 	}
 
-	// Track which types we've seen -- mirrors Rust classify_array which
-	// requires pure (single-type) arrays for non-mixed classification.
-	hasBool := false
-	hasNumber := false
-	hasString := false
-	hasObject := false
-	hasArray := false
-	hasNull := false
+	const (
+		maskBool   = 1 << 0
+		maskNumber = 1 << 1
+		maskString = 1 << 2
+		maskObject = 1 << 3
+		maskArray  = 1 << 4
+		maskNull   = 1 << 5
+	)
 
+	var seen uint8
 	for _, item := range items {
 		switch item.(type) {
 		case bool:
-			hasBool = true
+			seen |= maskBool
 		case float64, json.Number:
-			hasNumber = true
+			seen |= maskNumber
 		case string:
-			hasString = true
+			seen |= maskString
 		case map[string]interface{}:
-			hasObject = true
+			seen |= maskObject
 		case []interface{}, *rawBackedArray:
-			hasArray = true
+			seen |= maskArray
 		case nil:
-			hasNull = true
+			seen |= maskNull
 		}
 	}
 
-	// Pure dict array.
-	if hasObject && !hasBool && !hasNumber && !hasString && !hasArray && !hasNull {
+	switch seen {
+	case maskObject:
 		return ArrayDictArray
-	}
-	// Pure string array.
-	if hasString && !hasBool && !hasNumber && !hasObject && !hasArray && !hasNull {
+	case maskString:
 		return ArrayStringArray
-	}
-	// Pure number array (excludes bools).
-	if hasNumber && !hasBool && !hasString && !hasObject && !hasArray && !hasNull {
+	case maskNumber:
 		return ArrayNumberArray
-	}
-	// Pure bool array.
-	if hasBool && !hasNumber && !hasString && !hasObject && !hasArray && !hasNull {
-		// BoolArray not currently handled separately; treat as mixed.
+	case 0:
+		return ArrayEmpty
+	default:
 		return ArrayMixedArray
 	}
-	// Check if anything was detected at all.
-	if !hasBool && !hasNumber && !hasString && !hasObject && !hasArray && !hasNull {
-		return ArrayEmpty
-	}
-	return ArrayMixedArray
 }
 
 func interfaceToRawMessages(items []interface{}) []json.RawMessage {
