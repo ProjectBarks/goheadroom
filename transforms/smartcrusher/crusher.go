@@ -3,6 +3,7 @@ package smartcrusher
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -74,7 +75,7 @@ func (sc *SmartCrusher) SmartCrushContent(content string, queryContext string, b
 
 	crushed, info := sc.ProcessValue(parsed, 0, queryContext, bias)
 
-	result, err := json.Marshal(crushed)
+	result, err := marshalOrderedJSON([]byte(content), crushed)
 	if err != nil {
 		return content, false, ""
 	}
@@ -202,6 +203,24 @@ func (sc *SmartCrusher) CrushArray(items []json.RawMessage, queryContext string,
 		itemStrings[i] = string(raw)
 	}
 
+	var maxK *int
+	if sc.Config.MaxItemsAfterCrush > 0 {
+		v := sc.Config.MaxItemsAfterCrush
+		maxK = &v
+	}
+	adaptiveK := adaptivesizer.ComputeOptimalK(itemStrings, bias, 3, maxK)
+
+	// Tier-1 boundary: array already small enough -- passthrough,
+	// nothing to compact, nothing to drop.
+	if len(items) <= adaptiveK {
+		result := make([]json.RawMessage, len(items))
+		copy(result, items)
+		return CrushArrayResult{
+			Items:        result,
+			StrategyInfo: "none:adaptive_at_limit",
+		}
+	}
+
 	// Lossless-first: try tabular compaction before lossy selection.
 	if sc.Compaction != nil && len(items) >= sc.Config.MinItemsToAnalyze {
 		parsed := make([]interface{}, len(items))
@@ -228,23 +247,6 @@ func (sc *SmartCrusher) CrushArray(items []json.RawMessage, queryContext string,
 					CompactionKind: &kind,
 				}
 			}
-		}
-	}
-
-	var maxK *int
-	if sc.Config.MaxItemsAfterCrush > 0 {
-		v := sc.Config.MaxItemsAfterCrush
-		maxK = &v
-	}
-	adaptiveK := adaptivesizer.ComputeOptimalK(itemStrings, bias, 3, maxK)
-
-	// Tier-1 boundary: array already small enough.
-	if len(items) <= adaptiveK {
-		result := make([]json.RawMessage, len(items))
-		copy(result, items)
-		return CrushArrayResult{
-			Items:        result,
-			StrategyInfo: "none:adaptive_at_limit",
 		}
 	}
 
@@ -370,6 +372,30 @@ func (sc *SmartCrusher) CrushMixedArray(items []json.RawMessage, queryContext st
 					keepIndices[g.indices[i]] = true
 				}
 			}
+
+			// Outliers via finite-only stats (matches Rust crush_mixed_array).
+			var finite []float64
+			for _, raw := range g.values {
+				var num float64
+				if err := json.Unmarshal(raw, &num); err == nil && !math.IsInf(num, 0) && !math.IsNaN(num) {
+					finite = append(finite, num)
+				}
+			}
+			if len(finite) > 1 {
+				if meanV, ok := Mean(finite); ok {
+					if stdV, ok := SampleStdev(finite); ok && stdV > 0 {
+						threshold := sc.Config.VarianceThreshold * stdV
+						for i, raw := range g.values {
+							var num float64
+							if err := json.Unmarshal(raw, &num); err == nil && !math.IsInf(num, 0) && !math.IsNaN(num) {
+								if math.Abs(num-meanV) > threshold {
+									keepIndices[g.indices[i]] = true
+								}
+							}
+						}
+					}
+				}
+			}
 			strategyParts = append(strategyParts, fmt.Sprintf("num:%d", len(g.values)))
 
 		default:
@@ -397,32 +423,52 @@ func classifyInterfaceArray(items []interface{}) ArrayType {
 	if len(items) == 0 {
 		return ArrayEmpty
 	}
-	dictCount := 0
-	strCount := 0
-	numCount := 0
+
+	// Track which types we've seen -- mirrors Rust classify_array which
+	// requires pure (single-type) arrays for non-mixed classification.
+	hasBool := false
+	hasNumber := false
+	hasString := false
+	hasObject := false
+	hasArray := false
+	hasNull := false
 
 	for _, item := range items {
 		switch item.(type) {
-		case map[string]interface{}:
-			dictCount++
-		case string:
-			strCount++
+		case bool:
+			hasBool = true
 		case float64, json.Number:
-			numCount++
+			hasNumber = true
+		case string:
+			hasString = true
+		case map[string]interface{}:
+			hasObject = true
+		case []interface{}:
+			hasArray = true
+		case nil:
+			hasNull = true
 		}
 	}
 
-	n := len(items)
-	if dictCount > n/2 {
+	// Pure dict array.
+	if hasObject && !hasBool && !hasNumber && !hasString && !hasArray && !hasNull {
 		return ArrayDictArray
 	}
-	if strCount > n/2 {
+	// Pure string array.
+	if hasString && !hasBool && !hasNumber && !hasObject && !hasArray && !hasNull {
 		return ArrayStringArray
 	}
-	if numCount > n/2 {
+	// Pure number array (excludes bools).
+	if hasNumber && !hasBool && !hasString && !hasObject && !hasArray && !hasNull {
 		return ArrayNumberArray
 	}
-	if dictCount == 0 && strCount == 0 && numCount == 0 {
+	// Pure bool array.
+	if hasBool && !hasNumber && !hasString && !hasObject && !hasArray && !hasNull {
+		// BoolArray not currently handled separately; treat as mixed.
+		return ArrayMixedArray
+	}
+	// Check if anything was detected at all.
+	if !hasBool && !hasNumber && !hasString && !hasObject && !hasArray && !hasNull {
 		return ArrayEmpty
 	}
 	return ArrayMixedArray

@@ -17,7 +17,7 @@
   "input_sha256": "3bc015edc0a36387194d075139845c120a308afb314bae436ab454906b431d84",
   "output": {
     "cache_key": "80a6e711dbe62fc84e7b2b56",
-    "compressed": "line 297: INFO processing request\nline 298: INFO processing request\nline 299: INFO processing request\nERROR something broke at step 42\nTraceback (most recent call last):\n  File \"a.py\", line 5\nRuntimeError: boom\n# variant 13\n[297 lines omitted: 1 ERROR, 300 INFO]\n[305 lines compressed to 8. Retrieve more: hash=80a6e711dbe62fc84e7b2b56]",
+    "compressed": "line 297: INFO processing request\nline 298: INFO processing request\nline 299: INFO processing request\nERROR something broke at step 42\nTraceback (most recent call last):\n  File \"a.py\", line 5\nRuntimeError: boom\n# variant 13\n[297 lines omitted: 1 ERROR, 300 INFO]",
     "compressed_line_count": 8,
     "compression_ratio": 0.025658603466849474,
     "format_detected": "generic",
