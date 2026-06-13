@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Parity report generator: runs Go and Rust CLIs on every fixture,
-compares outputs, times each, generates self-contained HTML with diffs.
+compares outputs, times cold (CLI) and warm (library) paths,
+generates self-contained HTML with diffs and dual benchmarks.
 """
-import json, os, subprocess, sys, time, difflib
+import json, os, subprocess, sys, time, difflib, re
 from pathlib import Path
 from html import escape
 from collections import defaultdict
@@ -11,8 +12,8 @@ from collections import defaultdict
 GO_BIN = "/tmp/goheadroom-bench"
 RUST_BIN = os.path.expanduser("~/headroom-src/target/release/headroom-bench")
 FIXTURES_DIR = os.path.expanduser("~/goheadroom/testdata/parity")
+GO_TEST = os.path.expanduser("~/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.3.darwin-arm64/bin/go")
 
-# Transforms where output format differs but semantics match
 NORMALIZE_TRANSFORMS = {"content_detector", "ccr", "cache_aligner"}
 
 def run_timed(binary, fixture_path, runs=3):
@@ -36,7 +37,6 @@ def run_timed(binary, fixture_path, runs=3):
 
 def normalize_output(transform, output):
     if transform == "content_detector":
-        # Normalize: "GitDiff:1.00" -> "diff:1.00", "PlainText:0.50" -> "text:0.50"
         mapping = {
             "plaintext": "text", "gitdiff": "diff", "jsonarray": "json",
             "sourcecode": "code", "searchresults": "search", "buildoutput": "build",
@@ -67,9 +67,52 @@ def compute_diff_html(go_out, rust_out):
         lines.append(f"<span class='diff-hunk'>... {len(diff)-50} more lines</span>")
     return "\n".join(lines)
 
+def run_go_benchmarks():
+    """Run go test -bench=Cold/ and parse ns/op, B/op, allocs/op per transform."""
+    goheadroom_dir = os.path.expanduser("~/goheadroom")
+    warm = {}
+    cold = {}
+
+    for mode in ["Warm", "Cold"]:
+        print(f"  Running {mode} benchmarks...", file=sys.stderr)
+        try:
+            r = subprocess.run(
+                [GO_TEST, "test", f"-bench={mode}/", "-benchtime=1s", "-benchmem", "."],
+                capture_output=True, text=True, timeout=600, cwd=goheadroom_dir
+            )
+            target = warm if mode == "Warm" else cold
+            for line in r.stdout.splitlines():
+                if not line.startswith(f"Benchmark{mode}/"):
+                    continue
+                # Parse: BenchmarkWarm/SmartCrusher/fixture.json-16  1234  56789 ns/op  1234 B/op  56 allocs/op
+                m = re.match(
+                    rf'^Benchmark{mode}/(\w+)/(\S+)-\d+\s+\d+\s+([\d.]+)\s+ns/op\s+(\d+)\s+B/op\s+(\d+)\s+allocs/op',
+                    line
+                )
+                if m:
+                    transform = m.group(1)
+                    fixture = m.group(2)
+                    ns_op = float(m.group(3))
+                    b_op = int(m.group(4))
+                    allocs = int(m.group(5))
+                    target[fixture] = {
+                        "transform": transform,
+                        "ns_op": ns_op,
+                        "us_op": ns_op / 1000,
+                        "b_op": b_op,
+                        "allocs": allocs,
+                    }
+        except Exception as e:
+            print(f"  {mode} benchmark error: {e}", file=sys.stderr)
+
+    return warm, cold
+
 def main():
     fixtures = sorted(Path(FIXTURES_DIR).rglob("*.json"))
     print(f"Processing {len(fixtures)} fixtures...", file=sys.stderr)
+
+    # Run Go benchmarks first (warm + cold)
+    warm_bench, cold_bench = run_go_benchmarks()
 
     results = []
     for i, fpath in enumerate(fixtures):
@@ -93,7 +136,7 @@ def main():
         elif go_norm == rust_norm:
             status = "pass"
         elif transform in NORMALIZE_TRANSFORMS:
-            status = "pass"  # semantic match after normalization
+            status = "pass"
         else:
             status = "fail"
 
@@ -101,8 +144,12 @@ def main():
         if status == "fail":
             diff_html = compute_diff_html(go_out[:3000], rust_out[:3000])
 
+        fname = fpath.name
+        wb = warm_bench.get(fname, {})
+        cb = cold_bench.get(fname, {})
+
         results.append({
-            "fixture": fpath.name,
+            "fixture": fname,
             "category": category,
             "transform": transform,
             "status": status,
@@ -113,11 +160,33 @@ def main():
             "go_out": go_out[:1500],
             "rust_out": rust_out[:1500],
             "diff_html": diff_html,
+            "warm_us": round(wb.get("us_op", 0), 1),
+            "warm_allocs": wb.get("allocs", 0),
+            "warm_bop": wb.get("b_op", 0),
+            "cold_us": round(cb.get("us_op", 0), 1),
+            "cold_allocs": cb.get("allocs", 0),
+            "cold_bop": cb.get("b_op", 0),
         })
         if (i+1) % 20 == 0:
             print(f"  {i+1}/{len(fixtures)}...", file=sys.stderr)
 
     generate_html(results)
+
+def fmt_us(us):
+    if us == 0:
+        return "-"
+    if us >= 1000:
+        return f"{us/1000:.1f}ms"
+    return f"{us:.0f}us"
+
+def fmt_bytes(b):
+    if b == 0:
+        return "-"
+    if b >= 1048576:
+        return f"{b/1048576:.1f}MB"
+    if b >= 1024:
+        return f"{b/1024:.0f}KB"
+    return f"{b}B"
 
 def generate_html(results):
     total = len(results)
@@ -133,23 +202,46 @@ def generate_html(results):
     avg_go = sum(r["go_ms"] for r in results if r["go_ms"] > 0) / max(1, sum(1 for r in results if r["go_ms"] > 0))
     avg_rust = sum(r["rust_ms"] for r in results if r["rust_ms"] > 0) / max(1, sum(1 for r in results if r["rust_ms"] > 0))
 
+    # Compute per-category warm benchmark summaries for the summary table
+    cat_summaries = {}
+    for cat, entries in cats.items():
+        warm_times = [e["warm_us"] for e in entries if e["warm_us"] > 0]
+        cold_times = [e["cold_us"] for e in entries if e["cold_us"] > 0]
+        if warm_times:
+            cat_summaries[cat] = {
+                "warm_avg": sum(warm_times) / len(warm_times),
+                "warm_max": max(warm_times),
+                "cold_max": max(cold_times) if cold_times else 0,
+            }
+
+    # Summary cards for warm benchmarks
+    summary_rows = []
+    for cat in sorted(cat_summaries):
+        s = cat_summaries[cat]
+        summary_rows.append(
+            f'<tr><td>{escape(cat)}</td>'
+            f'<td class="mono r">{fmt_us(s["warm_avg"])}</td>'
+            f'<td class="mono r">{fmt_us(s["warm_max"])}</td>'
+            f'<td class="mono r">{fmt_us(s["cold_max"])}</td></tr>'
+        )
+
     rows = []
     for cat in sorted(cats):
         entries = cats[cat]
         cat_pass = sum(1 for e in entries if e["status"] == "pass")
         cat_total = len(entries)
         cat_color = "#3fb950" if cat_pass == cat_total else "#f85149"
-        rows.append(f'''<tr class="cat-row"><td colspan="8"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
+        rows.append(f'''<tr class="cat-row"><td colspan="12"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
 
         for e in sorted(entries, key=lambda x: x["fixture"]):
             s = e["status"]
             icon = {"pass": "&#10003;", "fail": "&#10007;", "both_skip": "&#8212;", "go_error": "&#9888;", "rust_error": "&#9888;"}.get(s, "?")
             color = {"pass": "#3fb950", "fail": "#f85149"}.get(s, "#8b949e")
 
-            speedup = ""
+            cli_ratio = ""
             if e["go_ms"] > 0 and e["rust_ms"] > 0:
                 ratio = e["go_ms"] / e["rust_ms"]
-                speedup = f"{ratio:.1f}x"
+                cli_ratio = f"{ratio:.1f}x"
 
             detail_id = e["fixture"].replace(".", "_")
             has_diff = "fail" == s and e["diff_html"]
@@ -157,16 +249,19 @@ def generate_html(results):
 
             rows.append(f'''<tr class="fix-row" data-status="{s}"{toggle}>
 <td><span style="color:{color}">{icon}</span></td>
-<td class="mono fname">{escape(e["fixture"][:45])}</td>
+<td class="mono fname">{escape(e["fixture"][:40])}</td>
 <td>{escape(e["transform"])}</td>
 <td class="mono r">{e["go_bytes"]}</td>
 <td class="mono r">{e["rust_bytes"]}</td>
-<td class="mono r">{e["go_ms"]:.1f}</td>
-<td class="mono r">{e["rust_ms"]:.1f}</td>
-<td class="mono r">{speedup}</td>
+<td class="mono r warm-col">{fmt_us(e["warm_us"])}</td>
+<td class="mono r warm-col">{fmt_bytes(e["warm_bop"])}</td>
+<td class="mono r warm-col">{e["warm_allocs"] if e["warm_allocs"] else "-"}</td>
+<td class="mono r cold-col">{e["go_ms"]:.1f}</td>
+<td class="mono r cold-col">{e["rust_ms"]:.1f}</td>
+<td class="mono r cold-col">{cli_ratio}</td>
 </tr>''')
             if has_diff:
-                rows.append(f'''<tr class="diff-row hidden" id="diff_{detail_id}"><td colspan="8"><div class="diff-box"><pre>{e["diff_html"]}</pre></div></td></tr>''')
+                rows.append(f'''<tr class="diff-row hidden" id="diff_{detail_id}"><td colspan="12"><div class="diff-box"><pre>{e["diff_html"]}</pre></div></td></tr>''')
 
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -174,10 +269,11 @@ def generate_html(results):
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d9}}
-.wrap{{max-width:1400px;margin:0 auto;padding:2rem}}
+.wrap{{max-width:1600px;margin:0 auto;padding:2rem}}
 h1{{font-size:2rem;color:#f0f6fc;margin-bottom:.3rem}}
+h2{{font-size:1.2rem;color:#f0f6fc;margin:1.5rem 0 .8rem}}
 .sub{{color:#8b949e;margin-bottom:1.5rem}}
-.hero{{display:flex;align-items:center;gap:2rem;margin:1.5rem 0}}
+.hero{{display:flex;align-items:center;gap:2rem;margin:1.5rem 0;flex-wrap:wrap}}
 .ring{{width:150px;height:150px;border-radius:50%;display:flex;align-items:center;justify-content:center}}
 .ring-inner{{width:120px;height:120px;border-radius:50%;background:#0d1117;display:flex;align-items:center;justify-content:center;flex-direction:column}}
 .pct{{font-size:2.8rem;font-weight:800;color:#f0f6fc}}
@@ -190,12 +286,12 @@ h1{{font-size:2rem;color:#f0f6fc;margin-bottom:.3rem}}
 .fbtn{{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:.4rem 1rem;border-radius:6px;cursor:pointer;font-size:.85rem}}
 .fbtn.on{{background:#388bfd20;border-color:#388bfd;color:#58a6ff}}
 table{{width:100%;border-collapse:collapse}}
-th{{background:#161b22;padding:.6rem .8rem;text-align:left;font-size:.75rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:1}}
+th{{background:#161b22;padding:.6rem .8rem;text-align:left;font-size:.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:1}}
 th.r{{text-align:right}}
 td{{padding:.4rem .8rem;border-bottom:1px solid #21262d;font-size:.82rem}}
 td.r{{text-align:right}}
-.mono{{font-family:'SF Mono','Fira Code',monospace;font-size:.78rem}}
-.fname{{max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.mono{{font-family:'SF Mono','Fira Code',monospace;font-size:.75rem}}
+.fname{{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .cat-row td{{background:#161b22;padding:.5rem .8rem;border-bottom:1px solid #30363d}}
 .toggle{{cursor:pointer}}.toggle:hover td{{background:#21262d}}
 .diff-row td{{padding:0}}.diff-box{{background:#161b22;padding:.8rem;max-height:300px;overflow:auto}}
@@ -203,6 +299,13 @@ td.r{{text-align:right}}
 .diff-add{{color:#3fb950;display:block}}.diff-del{{color:#f85149;display:block}}.diff-hunk{{color:#8b949e;display:block}}
 .hidden{{display:none}}
 tr.fhide{{display:none}}
+.th-warm{{color:#58a6ff!important}}
+.th-cold{{color:#f97316!important}}
+.warm-col{{color:#8db9e8}}
+.cold-col{{color:#d4956a}}
+.summary-table{{width:auto;margin-bottom:1.5rem}}
+.summary-table td,.summary-table th{{padding:.4rem 1.2rem}}
+.section-label{{font-size:.75rem;color:#8b949e;text-transform:uppercase;letter-spacing:.05em;padding:.3rem .8rem;background:#161b22;border:1px solid #30363d;border-radius:4px;margin-right:.5rem}}
 </style></head><body><div class="wrap">
 <h1>goheadroom Parity Report</h1>
 <p class="sub">Go vs Rust output comparison across {total} parity fixtures. Click failed rows to see diff.</p>
@@ -215,9 +318,19 @@ tr.fhide{{display:none}}
 <div class="card"><div class="card-v fail">{failed}</div><div class="card-l">Fail</div></div>
 <div class="card"><div class="card-v skip-c">{skipped}</div><div class="card-l">Skip</div></div>
 <div class="card"><div class="card-v" style="color:#f0f6fc">{total}</div><div class="card-l">Total</div></div>
-<div class="card"><div class="card-v" style="color:#00add8">{avg_go:.1f}ms</div><div class="card-l">Avg Go</div></div>
-<div class="card"><div class="card-v" style="color:#f97316">{avg_rust:.1f}ms</div><div class="card-l">Avg Rust</div></div>
+<div class="card"><div class="card-v" style="color:#00add8">{avg_go:.1f}ms</div><div class="card-l">Avg Go CLI</div></div>
+<div class="card"><div class="card-v" style="color:#f97316">{avg_rust:.1f}ms</div><div class="card-l">Avg Rust CLI</div></div>
 </div></div>
+
+<h2>Benchmark Summary (per category)</h2>
+<table class="summary-table"><thead><tr>
+<th>Category</th>
+<th class="r th-warm">Warm Avg</th>
+<th class="r th-warm">Warm Max</th>
+<th class="r th-cold">Cold Max</th>
+</tr></thead><tbody>
+{"".join(summary_rows)}
+</tbody></table>
 
 <div class="filters">
 <button class="fbtn on" onclick="filt('all',this)">All ({total})</button>
@@ -228,8 +341,9 @@ tr.fhide{{display:none}}
 
 <table><thead><tr>
 <th></th><th>Fixture</th><th>Transform</th>
-<th class="r">Go Bytes</th><th class="r">Rust Bytes</th>
-<th class="r">Go ms</th><th class="r">Rust ms</th><th class="r">Ratio</th>
+<th class="r">Go B</th><th class="r">Rust B</th>
+<th class="r th-warm">Warm</th><th class="r th-warm">B/op</th><th class="r th-warm">Allocs</th>
+<th class="r th-cold">Go CLI</th><th class="r th-cold">Rust CLI</th><th class="r th-cold">Ratio</th>
 </tr></thead><tbody>
 {"".join(rows)}
 </tbody></table>
