@@ -360,10 +360,10 @@ var (
 	newFileRe       = regexp.MustCompile(`^\+\+\+ (b/(.+)|/dev/null)$`)
 	binaryRe        = regexp.MustCompile(`^Binary files .+ differ$`)
 
-	priorityPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\b(error|exception|fail(?:ed|ure)?|fatal|critical|crash|panic)\b`),
-		regexp.MustCompile(`(?i)\b(important|note|todo|fixme|hack|xxx|bug|fix)\b`),
-		regexp.MustCompile(`(?i)\b(security|auth|password|secret|token)\b`),
+	priorityKeywords = [][]string{
+		{"error", "exception", "failed", "failure", "fail", "fatal", "critical", "crash", "panic"},
+		{"important", "note", "todo", "fixme", "hack", "xxx", "bug", "fix"},
+		{"security", "auth", "password", "secret", "token"},
 	}
 )
 
@@ -526,17 +526,73 @@ func hunkContainsFold(lines []string, substr string) bool {
 	return false
 }
 
-// hunkMatchesPriority checks whether any priorityPattern matches any line.
-// The patterns already carry the (?i) flag so they work on the original text.
+// hunkMatchesPriority checks whether any priority keyword appears as a
+// whole word (case-insensitive) in any line. This replaces the previous
+// regex-based approach for better performance.
 func hunkMatchesPriority(lines []string) bool {
 	for _, l := range lines {
-		for _, pat := range priorityPatterns {
-			if pat.MatchString(l) {
+		for _, group := range priorityKeywords {
+			if containsAnyWordCI(l, group) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// containsAnyWordCI returns true if s contains any of the keywords as a
+// whole word, case-insensitive. All keywords must be lowercase.
+func containsAnyWordCI(s string, keywords []string) bool {
+	for _, kw := range keywords {
+		if indexWordFoldASCII(s, kw) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// indexWordFoldASCII finds the first occurrence of kw in s as a whole word,
+// using ASCII case-folding. kw must be lowercase. Returns -1 if not found.
+func indexWordFoldASCII(s, kw string) int {
+	kwLen := len(kw)
+	for i := 0; i <= len(s)-kwLen; i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		if c != kw[0] {
+			continue
+		}
+		match := true
+		for j := 1; j < kwLen; j++ {
+			c := s[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 32
+			}
+			if c != kw[j] {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		if i > 0 {
+			b := s[i-1]
+			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' {
+				continue
+			}
+		}
+		end := i + kwLen
+		if end < len(s) {
+			b := s[end]
+			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' {
+				continue
+			}
+		}
+		return i
+	}
+	return -1
 }
 
 func scoreHunks(files []*diffFile, context string) {

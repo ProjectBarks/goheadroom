@@ -2,9 +2,9 @@ package smartcrusher
 
 import (
 	"encoding/json"
-	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/uber/goheadroom/transforms/adaptivesizer"
@@ -144,12 +144,12 @@ func CrushStringArray(items []string, config *SmartCrusherConfig, bias float64) 
 		result[i] = items[idx]
 	}
 
-	strategy := fmt.Sprintf("string:adaptive(%d->%d", n, len(result))
+	strategy := "string:adaptive(" + strconv.Itoa(n) + "->" + strconv.Itoa(len(result))
 	if dedupCount > 0 {
-		strategy += fmt.Sprintf(",dedup=%d", dedupCount)
+		strategy += ",dedup=" + strconv.Itoa(dedupCount)
 	}
 	if len(errorIndices) > 0 {
-		strategy += fmt.Sprintf(",errors=%d", len(errorIndices))
+		strategy += ",errors=" + strconv.Itoa(len(errorIndices))
 	}
 	strategy += ")"
 
@@ -316,16 +316,19 @@ func CrushNumberArray(items []json.RawMessage, config *SmartCrusherConfig, bias 
 
 	mn := finiteMin(finite)
 	mx := finiteMax(finite)
-	strategy := fmt.Sprintf("number:adaptive(%d->%d,min=%s,max=%s,mean=%s,median=%s,stddev=%s,p25=%s,p75=%s",
-		n, len(result),
-		formatNumberRepr(mn), formatNumberRepr(mx),
-		FormatG(meanVal), FormatG(medianVal),
-		FormatG(stdVal), FormatG(p25), FormatG(p75))
+	strategy := "number:adaptive(" + strconv.Itoa(n) + "->" + strconv.Itoa(len(result)) +
+		",min=" + formatNumberRepr(mn) +
+		",max=" + formatNumberRepr(mx) +
+		",mean=" + FormatG(meanVal) +
+		",median=" + FormatG(medianVal) +
+		",stddev=" + FormatG(stdVal) +
+		",p25=" + FormatG(p25) +
+		",p75=" + FormatG(p75)
 	if len(outlierIndices) > 0 {
-		strategy += fmt.Sprintf(",outliers=%d", len(outlierIndices))
+		strategy += ",outliers=" + strconv.Itoa(len(outlierIndices))
 	}
 	if len(changeIndices) > 0 {
-		strategy += fmt.Sprintf(",change_points=%d", len(changeIndices))
+		strategy += ",change_points=" + strconv.Itoa(len(changeIndices))
 	}
 	strategy += ")"
 
@@ -358,7 +361,7 @@ func CrushObject(obj map[string]json.RawMessage, config *SmartCrusherConfig, bia
 	// Compute adaptive K.
 	kvStrings := make([]string, n)
 	for i, key := range keys {
-		kvStrings[i] = fmt.Sprintf("%s: %s", key, string(obj[key]))
+		kvStrings[i] = key + ": " + string(obj[key])
 	}
 
 	var maxK *int
@@ -439,7 +442,7 @@ func CrushObject(obj map[string]json.RawMessage, config *SmartCrusherConfig, bia
 		}
 	}
 
-	strategy := fmt.Sprintf("object:adaptive(%d->%d keys)", n, len(result))
+	strategy := "object:adaptive(" + strconv.Itoa(n) + "->" + strconv.Itoa(len(result)) + " keys)"
 	return result, strategy
 }
 
@@ -506,9 +509,9 @@ func formatNumberRepr(x float64) string {
 		return "-inf"
 	}
 	if x == math.Trunc(x) && math.Abs(x) < 1e16 {
-		return fmt.Sprintf("%d", int64(x))
+		return strconv.FormatInt(int64(x), 10)
 	}
-	return fmt.Sprintf("%g", x)
+	return strconv.FormatFloat(x, 'g', -1, 64)
 }
 
 func meanSlice(values []float64) float64 {

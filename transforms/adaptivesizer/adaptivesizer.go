@@ -15,8 +15,6 @@ package adaptivesizer
 import (
 	"bytes"
 	"compress/flate"
-	"crypto/md5"
-	"encoding/binary"
 	"io"
 	"math"
 	"math/bits"
@@ -222,7 +220,7 @@ func isASCII(s string) bool {
 // Algorithm:
 //  1. Iterate character 4-grams (sliding window). For input shorter
 //     than 4 chars, the loop runs once with the entire string.
-//  2. Hash each gram with MD5; take the first 64 bits as big-endian u64.
+//  2. Hash each gram with FNV-1a 64-bit.
 //  3. Per-bit voting: +1 if set, -1 if clear.
 //  4. Final bit j is set iff votes[j] > 0 (strict).
 func Simhash(text string) uint64 {
@@ -261,8 +259,12 @@ func simhashASCII(text string) uint64 {
 		}
 		gramLen := end - i
 
-		digest := md5.Sum(buf[:gramLen])
-		h := binary.BigEndian.Uint64(digest[:8])
+		// Inline FNV-1a 64-bit hash for the gram (replaces md5).
+		h := uint64(14695981039346656037)
+		for j := 0; j < gramLen; j++ {
+			h ^= uint64(buf[j])
+			h *= 1099511628211
+		}
 
 		for j := range 64 {
 			if (h>>j)&1 == 1 {
@@ -310,8 +312,12 @@ func simhashUnicode(text string) uint64 {
 			off += utf8.EncodeRune(buf[off:], r)
 		}
 
-		digest := md5.Sum(buf[:off])
-		h := binary.BigEndian.Uint64(digest[:8])
+		// Inline FNV-1a 64-bit hash for the gram (replaces md5).
+		h := uint64(14695981039346656037)
+		for j := 0; j < off; j++ {
+			h ^= uint64(buf[j])
+			h *= 1099511628211
+		}
 
 		for j := range 64 {
 			if (h>>j)&1 == 1 {

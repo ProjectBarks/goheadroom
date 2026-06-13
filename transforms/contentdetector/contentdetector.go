@@ -139,26 +139,63 @@ func hasLiteralPrefix(s string, start int, prefix string) bool {
 
 // containsWordCI checks if line contains any of the keywords as whole words
 // (case-insensitive). Matches (?i)\b(KW1|KW2)\b
+// Zero-allocation: uses inline ASCII case-folding instead of strings.ToLower.
 func containsWordCI(line string, keywords []string) bool {
-	lower := strings.ToLower(line)
 	for _, kw := range keywords {
-		idx := 0
-		for {
-			pos := strings.Index(lower[idx:], kw)
-			if pos < 0 {
-				break
-			}
-			abs := idx + pos
-			// Check word boundaries
-			before := abs == 0 || !isWordChar(lower[abs-1])
-			after := abs+len(kw) >= len(lower) || !isWordChar(lower[abs+len(kw)])
-			if before && after {
-				return true
-			}
-			idx = abs + 1
+		if indexWordFoldASCII(line, kw) >= 0 {
+			return true
 		}
 	}
 	return false
+}
+
+// indexWordFoldASCII finds kw in s case-insensitively with word-boundary checks.
+// kw must be pre-lowercased ASCII. Returns index of match or -1.
+// Zero-allocation: folds case inline via byte arithmetic.
+func indexWordFoldASCII(s, kw string) int {
+	kwLen := len(kw)
+	if kwLen == 0 || len(s) < kwLen {
+		return -1
+	}
+	kw0 := kw[0]
+	limit := len(s) - kwLen
+	for i := 0; i <= limit; i++ {
+		// Quick check: first char with inline case fold
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		if c != kw0 {
+			continue
+		}
+
+		// Match remaining chars
+		match := true
+		for j := 1; j < kwLen; j++ {
+			c := s[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 32
+			}
+			if c != kw[j] {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+
+		// Word boundary checks
+		if i > 0 && isWordChar(s[i-1]) {
+			continue
+		}
+		end := i + kwLen
+		if end < len(s) && isWordChar(s[end]) {
+			continue
+		}
+		return i
+	}
+	return -1
 }
 
 // isDigit returns true for ASCII digits.

@@ -3,9 +3,9 @@ package smartcrusher
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,7 +107,7 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 				rawItems := interfaceToRawMessages(v)
 				result := sc.CrushArrayWithParsed(rawItems, v, queryContext, bias)
 				if result.Compacted != nil {
-					infoParts = append(infoParts, fmt.Sprintf("%s(%d->len=%d)", result.StrategyInfo, n, len(*result.Compacted)))
+					infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->len="+strconv.Itoa(len(*result.Compacted))+")")
 					return *result.Compacted, strings.Join(infoParts, ",")
 				}
 				// Use kept indices to pick from original []interface{} slice,
@@ -117,10 +117,10 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 					for i, idx := range result.KeptIndices {
 						kept[i] = v[idx]
 					}
-					infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", result.StrategyInfo, n, len(kept)))
+					infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(kept))+")")
 					return kept, strings.Join(infoParts, ",")
 				}
-				infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", result.StrategyInfo, n, len(result.Items)))
+				infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(result.Items))+")")
 				return rawMessagesToInterface(result.Items), strings.Join(infoParts, ",")
 
 			case ArrayStringArray:
@@ -131,7 +131,7 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 					}
 				}
 				crushed, strategy := CrushStringArray(strs, &sc.Config, bias)
-				infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", strategy, n, len(crushed)))
+				infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(crushed))+")")
 				result := make([]interface{}, len(crushed))
 				for i, s := range crushed {
 					result[i] = s
@@ -141,7 +141,7 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 			case ArrayNumberArray:
 				rawItems := interfaceToRawMessages(v)
 				keptIndices, strategy := crushNumberArrayIndices(rawItems, &sc.Config, bias)
-				infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", strategy, n, len(keptIndices)))
+				infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(keptIndices))+")")
 				kept := make([]interface{}, len(keptIndices))
 				for i, idx := range keptIndices {
 					kept[i] = v[idx]
@@ -151,7 +151,7 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 			case ArrayMixedArray:
 				rawItems := interfaceToRawMessages(v)
 				keptIndices, strategy := sc.crushMixedArrayIndices(rawItems, v, queryContext, bias)
-				infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", strategy, n, len(keptIndices)))
+				infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(keptIndices))+")")
 				kept := make([]interface{}, len(keptIndices))
 				for i, idx := range keptIndices {
 					kept[i] = v[idx]
@@ -172,19 +172,18 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 		return processed, strings.Join(infoParts, ",")
 
 	case map[string]interface{}:
-		// First pass: recurse into values.
-		processed := make(map[string]interface{})
+		// Recurse into values, modifying in place to avoid map allocation.
 		for k, val := range v {
 			pVal, pInfo := sc.ProcessValue(val, depth+1, queryContext, bias)
-			processed[k] = pVal
+			v[k] = pVal
 			if pInfo != "" {
 				infoParts = append(infoParts, pInfo)
 			}
 		}
 
-		// Second pass: if the object itself has many keys, compress at key level.
-		if len(processed) >= sc.Config.MinItemsToAnalyze {
-			rawObj := interfaceMapToRawMessages(processed)
+		// If the object itself has many keys, compress at key level.
+		if len(v) >= sc.Config.MinItemsToAnalyze {
+			rawObj := interfaceMapToRawMessages(v)
 			crushed, strategy := CrushObject(rawObj, &sc.Config, bias)
 			if strategy != "object:passthrough" {
 				infoParts = append(infoParts, strategy)
@@ -192,7 +191,7 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 			}
 		}
 
-		return processed, strings.Join(infoParts, ",")
+		return v, strings.Join(infoParts, ",")
 
 	default:
 		return value, ""
@@ -289,7 +288,7 @@ func (sc *SmartCrusher) CrushArrayWithParsed(items []json.RawMessage, parsedItem
 				return CrushArrayResult{
 					Items:          result,
 					KeptIndices:    allIndices,
-					StrategyInfo:   fmt.Sprintf("lossless:%s", kind),
+					StrategyInfo:   "lossless:" + kind,
 					Compacted:      &rendered,
 					CompactionKind: &kind,
 				}
@@ -305,7 +304,7 @@ func (sc *SmartCrusher) CrushArrayWithParsed(items []json.RawMessage, parsedItem
 	if analysis.RecommendedStrategy == StrategySkip {
 		reason := ""
 		if analysis.Crushability != nil {
-			reason = fmt.Sprintf("skip:%s", analysis.Crushability.Reason)
+			reason = "skip:" + analysis.Crushability.Reason
 		}
 		allIndices := makeRangeSlice(len(items))
 		result := make([]json.RawMessage, len(items))
@@ -387,7 +386,7 @@ func (sc *SmartCrusher) CrushMixedArray(items []json.RawMessage, queryContext st
 					keepIndices[idx] = true
 				}
 			}
-			strategyParts = append(strategyParts, fmt.Sprintf("dict:%d->%d", len(g.values), len(result.Items)))
+			strategyParts = append(strategyParts, "dict:"+strconv.Itoa(len(g.values))+"->"+strconv.Itoa(len(result.Items)))
 
 		case "str":
 			strs := make([]string, 0, len(g.values))
@@ -408,7 +407,7 @@ func (sc *SmartCrusher) CrushMixedArray(items []json.RawMessage, queryContext st
 					keepIndices[idx] = true
 				}
 			}
-			strategyParts = append(strategyParts, fmt.Sprintf("str:%d->%d", len(g.values), len(crushed)))
+			strategyParts = append(strategyParts, "str:"+strconv.Itoa(len(g.values))+"->"+strconv.Itoa(len(crushed)))
 
 		case "number":
 			strItems := make([]string, len(g.values))
@@ -450,7 +449,7 @@ func (sc *SmartCrusher) CrushMixedArray(items []json.RawMessage, queryContext st
 					}
 				}
 			}
-			strategyParts = append(strategyParts, fmt.Sprintf("num:%d", len(g.values)))
+			strategyParts = append(strategyParts, "num:"+strconv.Itoa(len(g.values)))
 
 		default:
 			// list / bool / none / other: keep all items.
@@ -467,7 +466,7 @@ func (sc *SmartCrusher) CrushMixedArray(items []json.RawMessage, queryContext st
 		result[i] = items[idx]
 	}
 
-	strategy := fmt.Sprintf("mixed:adaptive(%d->%d,%s)", n, len(result), strings.Join(strategyParts, ","))
+	strategy := "mixed:adaptive(" + strconv.Itoa(n) + "->" + strconv.Itoa(len(result)) + "," + strings.Join(strategyParts, ",") + ")"
 	return result, strategy
 }
 
@@ -759,7 +758,7 @@ func (sc *SmartCrusher) crushMixedArrayIndices(items []json.RawMessage, parsedIt
 					keepIndices[idx] = true
 				}
 			}
-			strategyParts = append(strategyParts, fmt.Sprintf("dict:%d->%d", len(g.values), len(result.Items)))
+			strategyParts = append(strategyParts, "dict:"+strconv.Itoa(len(g.values))+"->"+strconv.Itoa(len(result.Items)))
 
 		case "str":
 			strs := make([]string, 0, len(g.values))
@@ -780,7 +779,7 @@ func (sc *SmartCrusher) crushMixedArrayIndices(items []json.RawMessage, parsedIt
 					keepIndices[idx] = true
 				}
 			}
-			strategyParts = append(strategyParts, fmt.Sprintf("str:%d->%d", len(g.values), len(crushed)))
+			strategyParts = append(strategyParts, "str:"+strconv.Itoa(len(g.values))+"->"+strconv.Itoa(len(crushed)))
 
 		case "number":
 			strItems := make([]string, len(g.values))
@@ -822,7 +821,7 @@ func (sc *SmartCrusher) crushMixedArrayIndices(items []json.RawMessage, parsedIt
 					}
 				}
 			}
-			strategyParts = append(strategyParts, fmt.Sprintf("num:%d", len(g.values)))
+			strategyParts = append(strategyParts, "num:"+strconv.Itoa(len(g.values)))
 
 		default:
 			// list / bool / none / other: keep all items.
@@ -835,6 +834,6 @@ func (sc *SmartCrusher) crushMixedArrayIndices(items []json.RawMessage, parsedIt
 	// Reassemble in original order.
 	sorted := setToSortedSlice(keepIndices)
 
-	strategy := fmt.Sprintf("mixed:adaptive(%d->%d,%s)", n, len(sorted), strings.Join(strategyParts, ","))
+	strategy := "mixed:adaptive(" + strconv.Itoa(n) + "->" + strconv.Itoa(len(sorted)) + "," + strings.Join(strategyParts, ",") + ")"
 	return sorted, strategy
 }
