@@ -246,29 +246,6 @@ func (sc *SmartCrusher) CrushArray(items []json.RawMessage, queryContext string,
 // pre-parsed interface values to avoid redundant json.Unmarshal in the compaction path.
 // When parsedItems is non-nil, it must have the same length as items.
 func (sc *SmartCrusher) CrushArrayWithParsed(items []json.RawMessage, parsedItems []interface{}, queryContext string, bias float64) CrushArrayResult {
-	itemStrings := make([]string, len(items))
-	for i, raw := range items {
-		itemStrings[i] = string(raw)
-	}
-
-	var maxK *int
-	if sc.Config.MaxItemsAfterCrush > 0 {
-		v := sc.Config.MaxItemsAfterCrush
-		maxK = &v
-	}
-	adaptiveK := adaptivesizer.ComputeOptimalK(itemStrings, bias, 3, maxK)
-
-	if len(items) <= adaptiveK {
-		allIndices := makeRangeSlice(len(items))
-		result := make([]json.RawMessage, len(items))
-		copy(result, items)
-		return CrushArrayResult{
-			Items:        result,
-			KeptIndices:  allIndices,
-			StrategyInfo: "none:adaptive_at_limit",
-		}
-	}
-
 	if sc.Compaction != nil && len(items) >= sc.Config.MinItemsToAnalyze {
 		parsed := parsedItems
 		if parsed == nil {
@@ -295,6 +272,29 @@ func (sc *SmartCrusher) CrushArrayWithParsed(items []json.RawMessage, parsedItem
 					CompactionKind: &kind,
 				}
 			}
+		}
+	}
+
+	itemStrings := make([]string, len(items))
+	for i, raw := range items {
+		itemStrings[i] = string(raw)
+	}
+
+	var maxK *int
+	if sc.Config.MaxItemsAfterCrush > 0 {
+		v := sc.Config.MaxItemsAfterCrush
+		maxK = &v
+	}
+	adaptiveK := adaptivesizer.ComputeOptimalK(itemStrings, bias, 3, maxK)
+
+	if len(items) <= adaptiveK {
+		allIndices := makeRangeSlice(len(items))
+		result := make([]json.RawMessage, len(items))
+		copy(result, items)
+		return CrushArrayResult{
+			Items:        result,
+			KeptIndices:  allIndices,
+			StrategyInfo: "none:adaptive_at_limit",
 		}
 	}
 

@@ -549,10 +549,25 @@ func matchBinary(line string) bool {
 	return strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, " differ") && len(line) > 20
 }
 
-var priorityKeywords = [][]string{
-	{"error", "exception", "failed", "failure", "fail", "fatal", "critical", "crash", "panic"},
-	{"important", "note", "todo", "fixme", "hack", "xxx", "bug", "fix"},
-	{"security", "auth", "password", "secret", "token"},
+var priorityKeywordsFlat = []string{
+	"error", "exception", "failed", "failure", "fail", "fatal", "critical", "crash", "panic",
+	"important", "note", "todo", "fixme", "hack", "xxx", "bug", "fix",
+	"security", "auth", "password", "secret", "token",
+}
+
+var priorityFirstChars [26]bool
+var priorityMinLen int
+
+func init() {
+	priorityMinLen = len(priorityKeywordsFlat[0])
+	for _, kw := range priorityKeywordsFlat {
+		if len(kw) > 0 && kw[0] >= 'a' && kw[0] <= 'z' {
+			priorityFirstChars[kw[0]-'a'] = true
+		}
+		if len(kw) < priorityMinLen {
+			priorityMinLen = len(kw)
+		}
+	}
 }
 
 func isDiffHeader(line string) bool {
@@ -763,9 +778,42 @@ func hunkMatchesPriorityH(h *diffHunk) bool {
 	n := h.lineCount()
 	for i := 0; i < n; i++ {
 		l := h.lineAt(i)
-		for _, group := range priorityKeywords {
-			if textutil.ContainsAnyWordCI(l, group) {
-				return true
+		if len(l) < priorityMinLen {
+			continue
+		}
+		for j := 0; j < len(l); j++ {
+			c := l[j] | 0x20
+			if c < 'a' || c > 'z' {
+				continue
+			}
+			if !priorityFirstChars[c-'a'] {
+				continue
+			}
+			if j > 0 && textutil.IsWordChar(l[j-1]) {
+				continue
+			}
+			for _, kw := range priorityKeywordsFlat {
+				if kw[0] != c {
+					continue
+				}
+				kwLen := len(kw)
+				if j+kwLen > len(l) {
+					continue
+				}
+				end := j + kwLen
+				if end < len(l) && textutil.IsWordChar(l[end]) {
+					continue
+				}
+				match := true
+				for k := 1; k < kwLen; k++ {
+					if l[j+k]|0x20 != kw[k] {
+						match = false
+						break
+					}
+				}
+				if match {
+					return true
+				}
 			}
 		}
 	}

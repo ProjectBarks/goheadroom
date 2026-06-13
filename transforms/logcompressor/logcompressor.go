@@ -255,20 +255,37 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 
 // ── Format detection ────────────────────────────────────────────────
 
-var formatPatterns = []struct {
-	format   LogFormat
-	patterns []string
-}{
-	{LogFormatPytest, []string{
-		"=== FAILURES", "=== ERRORS", "=== test session",
-		"=== short test summary", "PASSED [", "FAILED [",
-		"ERROR [", "SKIPPED [", "collected ",
-	}},
-	{LogFormatNpm, []string{"npm ERR!", "npm WARN", "npm info", "npm http"}},
-	{LogFormatCargo, []string{"Compiling ", "Finished ", "Running ", "warning: ", "error[E"}},
-	{LogFormatJest, []string{"PASS ", "FAIL ", "Test Suites:"}},
-	{LogFormatMake, []string{"make[", "make:", "gcc ", "g++ ", "clang "}},
+type formatCandidate struct {
+	format  LogFormat
+	pattern string
 }
+
+var formatByFirstByte [256][]formatCandidate
+
+func init() {
+	raw := []struct {
+		format   LogFormat
+		patterns []string
+	}{
+		{LogFormatPytest, []string{
+			"=== FAILURES", "=== ERRORS", "=== test session",
+			"=== short test summary", "PASSED [", "FAILED [",
+			"ERROR [", "SKIPPED [", "collected ",
+		}},
+		{LogFormatNpm, []string{"npm ERR!", "npm WARN", "npm info", "npm http"}},
+		{LogFormatCargo, []string{"Compiling ", "Finished ", "Running ", "warning: ", "error[E"}},
+		{LogFormatJest, []string{"PASS ", "FAIL ", "Test Suites:"}},
+		{LogFormatMake, []string{"make[", "make:", "gcc ", "g++ ", "clang "}},
+	}
+	for _, fp := range raw {
+		for _, pat := range fp.patterns {
+			b := pat[0]
+			formatByFirstByte[b] = append(formatByFirstByte[b], formatCandidate{fp.format, pat})
+		}
+	}
+}
+
+const numFormats = 6
 
 func splitLines(content string) []string {
 	n := strings.Count(content, "\n") + 1
@@ -289,26 +306,39 @@ func detectFormatLines(lines []string) LogFormat {
 	if sampleN > 100 {
 		sampleN = 100
 	}
-	var bestFormat LogFormat
-	bestScore := 0
-	for _, fp := range formatPatterns {
-		score := 0
-		for i := 0; i < sampleN; i++ {
-			line := lines[i]
-			for _, pat := range fp.patterns {
-				if len(pat) <= len(line) && strings.Contains(line, pat) {
-					score++
-					break
+	var scores [numFormats]int
+	var matched [numFormats]bool
+	for i := 0; i < sampleN; i++ {
+		line := lines[i]
+		n := len(line)
+		if n == 0 {
+			continue
+		}
+		for k := range matched {
+			matched[k] = false
+		}
+		for j := 0; j < n; j++ {
+			candidates := formatByFirstByte[line[j]]
+			for _, c := range candidates {
+				fi := int(c.format)
+				if matched[fi] {
+					continue
+				}
+				pl := len(c.pattern)
+				if j+pl <= n && line[j:j+pl] == c.pattern {
+					scores[fi]++
+					matched[fi] = true
 				}
 			}
 		}
-		if score > bestScore {
-			bestScore = score
-			bestFormat = fp.format
-		}
 	}
-	if bestScore == 0 {
-		return LogFormatGeneric
+	bestFormat := LogFormatGeneric
+	bestScore := 0
+	for fi := 0; fi < numFormats-1; fi++ {
+		if scores[fi] > bestScore {
+			bestScore = scores[fi]
+			bestFormat = LogFormat(fi)
+		}
 	}
 	return bestFormat
 }
