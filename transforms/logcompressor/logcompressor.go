@@ -7,9 +7,10 @@ package logcompressor
 
 import (
 	"crypto/md5"
-	"fmt"
+	"encoding/hex"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -216,9 +217,18 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 		} else if store != nil {
 			key := md5Hex24(content)
 			store.Put(key, []byte(content))
-			marker := fmt.Sprintf("\n[%d lines compressed to %d. Retrieve more: hash=%s]",
-				originalLineCount, len(selected), key)
-			compressed += marker
+			// Build marker with strings.Builder to avoid string concat alloc.
+			var mb strings.Builder
+			mb.Grow(len(compressed) + 80)
+			mb.WriteString(compressed)
+			mb.WriteString("\n[")
+			mb.WriteString(strconv.Itoa(originalLineCount))
+			mb.WriteString(" lines compressed to ")
+			mb.WriteString(strconv.Itoa(len(selected)))
+			mb.WriteString(". Retrieve more: hash=")
+			mb.WriteString(key)
+			mb.WriteByte(']')
+			compressed = mb.String()
 			cacheKey = &key
 			stats.CCREmitted = true
 		} else {
@@ -393,14 +403,13 @@ func isJavaAtFrame(s string) bool {
 }
 
 func hasLineColSuffix(s string) bool {
-	bytes := []byte(s)
-	for i := 0; i < len(bytes)-2; i++ {
-		if bytes[i] == ':' && bytes[i+1] >= '0' && bytes[i+1] <= '9' {
+	for i := 0; i < len(s)-2; i++ {
+		if s[i] == ':' && s[i+1] >= '0' && s[i+1] <= '9' {
 			j := i + 1
-			for j < len(bytes) && bytes[j] >= '0' && bytes[j] <= '9' {
+			for j < len(s) && s[j] >= '0' && s[j] <= '9' {
 				j++
 			}
-			if j < len(bytes) && bytes[j] == ':' && j+1 < len(bytes) && bytes[j+1] >= '0' && bytes[j+1] <= '9' {
+			if j < len(s) && s[j] == ':' && j+1 < len(s) && s[j+1] >= '0' && s[j+1] <= '9' {
 				return true
 			}
 		}
@@ -817,33 +826,63 @@ func (lc *LogCompressor) formatOutput(selected []LogLine, allLines []LogLine) (s
 		"selected": int64(len(selected)),
 	}
 
-	output := make([]string, 0, len(selected)+1)
-	for _, l := range selected {
-		output = append(output, l.Content)
+	// Estimate output size to minimize Builder growth.
+	estSize := 0
+	for i := range selected {
+		estSize += len(selected[i].Content) + 1 // +1 for newline separator
+	}
+	estSize += 128 // room for the omitted-lines trailer
+
+	var b strings.Builder
+	b.Grow(estSize)
+
+	for i := range selected {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(selected[i].Content)
 	}
 
 	omitted := len(allLines) - len(selected)
 	if omitted > 0 {
-		var parts []string
-		for _, entry := range []struct {
+		type labelKey struct {
 			label string
 			key   string
-		}{
+		}
+		entries := [4]labelKey{
 			{"ERROR", "errors"},
 			{"FAIL", "fails"},
 			{"WARN", "warnings"},
 			{"INFO", "info"},
-		} {
+		}
+		// Build the parts inline into a small buffer to avoid []string alloc.
+		var partsB strings.Builder
+		partsB.Grow(64)
+		partCount := 0
+		for _, entry := range entries {
 			n := stats[entry.key]
 			if n > 0 {
-				parts = append(parts, fmt.Sprintf("%d %s", n, entry.label))
+				if partCount > 0 {
+					partsB.WriteString(", ")
+				}
+				partsB.WriteString(strconv.FormatInt(n, 10))
+				partsB.WriteByte(' ')
+				partsB.WriteString(entry.label)
+				partCount++
 			}
 		}
-		if len(parts) > 0 {
-			output = append(output, fmt.Sprintf("[%d lines omitted: %s]", omitted, strings.Join(parts, ", ")))
+		if partCount > 0 {
+			if len(selected) > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteByte('[')
+			b.WriteString(strconv.Itoa(omitted))
+			b.WriteString(" lines omitted: ")
+			b.WriteString(partsB.String())
+			b.WriteByte(']')
 		}
 	}
-	return strings.Join(output, "\n"), stats
+	return b.String(), stats
 }
 
 func countLevel(lines []LogLine, level LogLevel) int64 {
@@ -860,6 +899,7 @@ func countLevel(lines []LogLine, level LogLevel) int64 {
 
 func md5Hex24(s string) string {
 	h := md5.Sum([]byte(s))
-	hex := fmt.Sprintf("%x", h)
-	return hex[:24]
+	var buf [32]byte
+	hex.Encode(buf[:], h[:])
+	return string(buf[:24])
 }

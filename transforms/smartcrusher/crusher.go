@@ -1,6 +1,7 @@
 package smartcrusher
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -16,6 +17,7 @@ import (
 // CrushArrayResult is the return type for CrushArray.
 type CrushArrayResult struct {
 	Items          []json.RawMessage
+	KeptIndices    []int // indices into the original input slice that were kept
 	StrategyInfo   string
 	CCRHash        *string
 	DroppedSummary string
@@ -69,7 +71,7 @@ func (sc *SmartCrusher) Crush(content string, query string, bias float64) CrushR
 // Returns (crushedContent, wasModified, info).
 func (sc *SmartCrusher) SmartCrushContent(content string, queryContext string, bias float64) (string, bool, string) {
 	var parsed interface{}
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+	if err := json.NewDecoder(strings.NewReader(content)).Decode(&parsed); err != nil {
 		return content, false, ""
 	}
 
@@ -103,10 +105,20 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 			switch arrType {
 			case ArrayDictArray:
 				rawItems := interfaceToRawMessages(v)
-				result := sc.CrushArray(rawItems, queryContext, bias)
+				result := sc.CrushArrayWithParsed(rawItems, v, queryContext, bias)
 				if result.Compacted != nil {
 					infoParts = append(infoParts, fmt.Sprintf("%s(%d->len=%d)", result.StrategyInfo, n, len(*result.Compacted)))
 					return *result.Compacted, strings.Join(infoParts, ",")
+				}
+				// Use kept indices to pick from original []interface{} slice,
+				// avoiding rawMessagesToInterface unmarshal round-trip.
+				if result.KeptIndices != nil {
+					kept := make([]interface{}, len(result.KeptIndices))
+					for i, idx := range result.KeptIndices {
+						kept[i] = v[idx]
+					}
+					infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", result.StrategyInfo, n, len(kept)))
+					return kept, strings.Join(infoParts, ",")
 				}
 				infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", result.StrategyInfo, n, len(result.Items)))
 				return rawMessagesToInterface(result.Items), strings.Join(infoParts, ",")
@@ -128,15 +140,23 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 
 			case ArrayNumberArray:
 				rawItems := interfaceToRawMessages(v)
-				crushed, strategy := CrushNumberArray(rawItems, &sc.Config, bias)
-				infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", strategy, n, len(crushed)))
-				return rawMessagesToInterface(crushed), strings.Join(infoParts, ",")
+				keptIndices, strategy := crushNumberArrayIndices(rawItems, &sc.Config, bias)
+				infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", strategy, n, len(keptIndices)))
+				kept := make([]interface{}, len(keptIndices))
+				for i, idx := range keptIndices {
+					kept[i] = v[idx]
+				}
+				return kept, strings.Join(infoParts, ",")
 
 			case ArrayMixedArray:
 				rawItems := interfaceToRawMessages(v)
-				crushed, strategy := sc.CrushMixedArray(rawItems, queryContext, bias)
-				infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", strategy, n, len(crushed)))
-				return rawMessagesToInterface(crushed), strings.Join(infoParts, ",")
+				keptIndices, strategy := sc.crushMixedArrayIndices(rawItems, v, queryContext, bias)
+				infoParts = append(infoParts, fmt.Sprintf("%s(%d->%d)", strategy, n, len(keptIndices)))
+				kept := make([]interface{}, len(keptIndices))
+				for i, idx := range keptIndices {
+					kept[i] = v[idx]
+				}
+				return kept, strings.Join(infoParts, ",")
 			}
 		}
 
@@ -182,22 +202,41 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 // ExecutePlan executes a CompressionPlan against items.
 // Returns the kept-items list in original-array order.
 func (sc *SmartCrusher) ExecutePlan(plan *CompressionPlan, items []json.RawMessage) []json.RawMessage {
+	indices := executePlanIndices(plan, len(items))
+	result := make([]json.RawMessage, len(indices))
+	for i, idx := range indices {
+		result[i] = items[idx]
+	}
+	return result
+}
+
+// executePlanIndices returns the sorted kept indices from a plan, filtered to valid bounds.
+func executePlanIndices(plan *CompressionPlan, itemCount int) []int {
 	indices := make([]int, len(plan.KeepIndices))
 	copy(indices, plan.KeepIndices)
 	sort.Ints(indices)
 
-	var result []json.RawMessage
+	// Filter to valid indices.
+	n := 0
 	for _, idx := range indices {
-		if idx < len(items) {
-			result = append(result, items[idx])
+		if idx < itemCount {
+			indices[n] = idx
+			n++
 		}
 	}
-	return result
+	return indices[:n]
 }
 
 // CrushArray compresses an array of dict items.
 // Port of Rust crush_array.
 func (sc *SmartCrusher) CrushArray(items []json.RawMessage, queryContext string, bias float64) CrushArrayResult {
+	return sc.CrushArrayWithParsed(items, nil, queryContext, bias)
+}
+
+// CrushArrayWithParsed compresses an array of dict items, optionally accepting
+// pre-parsed interface values to avoid redundant json.Unmarshal in the compaction path.
+// When parsedItems is non-nil, it must have the same length as items.
+func (sc *SmartCrusher) CrushArrayWithParsed(items []json.RawMessage, parsedItems []interface{}, queryContext string, bias float64) CrushArrayResult {
 	itemStrings := make([]string, len(items))
 	for i, raw := range items {
 		itemStrings[i] = string(raw)
@@ -213,21 +252,27 @@ func (sc *SmartCrusher) CrushArray(items []json.RawMessage, queryContext string,
 	// Tier-1 boundary: array already small enough -- passthrough,
 	// nothing to compact, nothing to drop.
 	if len(items) <= adaptiveK {
+		allIndices := makeRangeSlice(len(items))
 		result := make([]json.RawMessage, len(items))
 		copy(result, items)
 		return CrushArrayResult{
 			Items:        result,
+			KeptIndices:  allIndices,
 			StrategyInfo: "none:adaptive_at_limit",
 		}
 	}
 
 	// Lossless-first: try tabular compaction before lossy selection.
 	if sc.Compaction != nil && len(items) >= sc.Config.MinItemsToAnalyze {
-		parsed := make([]interface{}, len(items))
-		for i, raw := range items {
-			var v interface{}
-			json.Unmarshal(raw, &v)
-			parsed[i] = v
+		// Use pre-parsed values if available, avoiding redundant unmarshal.
+		parsed := parsedItems
+		if parsed == nil {
+			parsed = make([]interface{}, len(items))
+			for i, raw := range items {
+				var v interface{}
+				json.Unmarshal(raw, &v)
+				parsed[i] = v
+			}
 		}
 		c, rendered := sc.Compaction.Run(parsed)
 		if c.WasCompacted() {
@@ -238,12 +283,14 @@ func (sc *SmartCrusher) CrushArray(items []json.RawMessage, queryContext string,
 			}
 			if savingsRatio >= sc.Config.LosslessMinSavingsRatio {
 				kind := compactionKindStr(c)
+				allIndices := makeRangeSlice(len(items))
 				result := make([]json.RawMessage, len(items))
 				copy(result, items)
 				return CrushArrayResult{
-					Items:        result,
-					StrategyInfo: fmt.Sprintf("lossless:%s", kind),
-					Compacted:    &rendered,
+					Items:          result,
+					KeptIndices:    allIndices,
+					StrategyInfo:   fmt.Sprintf("lossless:%s", kind),
+					Compacted:      &rendered,
 					CompactionKind: &kind,
 				}
 			}
@@ -260,22 +307,29 @@ func (sc *SmartCrusher) CrushArray(items []json.RawMessage, queryContext string,
 		if analysis.Crushability != nil {
 			reason = fmt.Sprintf("skip:%s", analysis.Crushability.Reason)
 		}
+		allIndices := makeRangeSlice(len(items))
 		result := make([]json.RawMessage, len(items))
 		copy(result, items)
 		return CrushArrayResult{
 			Items:        result,
+			KeptIndices:  allIndices,
 			StrategyInfo: reason,
 		}
 	}
 
 	planner := NewSmartCrusherPlanner(&sc.Config, sc.AnchorSelector, sc.Analyzer, sc.Constraints)
 	plan := planner.CreatePlan(analysis, items, queryContext, nil, &effectiveMaxItems, itemStrings)
-	kept := sc.ExecutePlan(&plan, items)
+	keptIndices := executePlanIndices(&plan, len(items))
+	kept := make([]json.RawMessage, len(keptIndices))
+	for i, idx := range keptIndices {
+		kept[i] = items[idx]
+	}
 
 	strategyInfo := analysis.RecommendedStrategy.String()
 
 	return CrushArrayResult{
 		Items:        kept,
+		KeptIndices:  keptIndices,
 		StrategyInfo: strategyInfo,
 	}
 }
@@ -476,12 +530,23 @@ func classifyInterfaceArray(items []interface{}) ArrayType {
 
 func interfaceToRawMessages(items []interface{}) []json.RawMessage {
 	result := make([]json.RawMessage, len(items))
+	// Use a shared buffer + encoder to avoid per-item allocation overhead.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
 	for i, item := range items {
-		data, err := json.Marshal(item)
-		if err != nil {
+		buf.Reset()
+		if err := enc.Encode(item); err != nil {
 			result[i] = json.RawMessage("null")
 		} else {
-			result[i] = data
+			// Encode appends a newline; trim it and copy.
+			b := buf.Bytes()
+			if len(b) > 0 && b[len(b)-1] == '\n' {
+				b = b[:len(b)-1]
+			}
+			cp := make([]byte, len(b))
+			copy(cp, b)
+			result[i] = json.RawMessage(cp)
 		}
 	}
 	return result
@@ -566,4 +631,167 @@ func compactionKindStr(c *compaction.Compaction) string {
 	default:
 		return "unknown"
 	}
+}
+
+// makeRangeSlice returns [0, 1, 2, ..., n-1].
+func makeRangeSlice(n int) []int {
+	s := make([]int, n)
+	for i := range s {
+		s[i] = i
+	}
+	return s
+}
+
+// crushNumberArrayIndices is like CrushNumberArray but returns kept indices
+// instead of the items themselves, avoiding allocation of a result slice.
+func crushNumberArrayIndices(items []json.RawMessage, config *SmartCrusherConfig, bias float64) ([]int, string) {
+	result, strategy := CrushNumberArray(items, config, bias)
+	// Map result items back to indices by identity (byte slice pointer).
+	// CrushNumberArray returns slices of the input, so we can match by content.
+	// Build a simple index: for each result item, find its position in items.
+	indices := make([]int, 0, len(result))
+	used := make([]bool, len(items))
+	for _, r := range result {
+		rs := string(r)
+		for j, item := range items {
+			if !used[j] && string(item) == rs {
+				indices = append(indices, j)
+				used[j] = true
+				break
+			}
+		}
+	}
+	sort.Ints(indices)
+	return indices, strategy
+}
+
+// crushMixedArrayIndices is like CrushMixedArray but returns kept indices
+// and accepts pre-parsed values for the caller to use directly.
+func (sc *SmartCrusher) crushMixedArrayIndices(items []json.RawMessage, parsedItems []interface{}, queryContext string, bias float64) ([]int, string) {
+	n := len(items)
+	if n <= 8 {
+		return makeRangeSlice(n), "mixed:passthrough"
+	}
+
+	// Group by type.
+	type group struct {
+		key     string
+		indices []int
+		values  []json.RawMessage
+	}
+	var groups []group
+	groupIndex := make(map[string]int)
+
+	for i, raw := range items {
+		key := groupKey(raw)
+		if idx, ok := groupIndex[key]; ok {
+			groups[idx].indices = append(groups[idx].indices, i)
+			groups[idx].values = append(groups[idx].values, raw)
+		} else {
+			groupIndex[key] = len(groups)
+			groups = append(groups, group{key: key, indices: []int{i}, values: []json.RawMessage{raw}})
+		}
+	}
+
+	keepIndices := make(map[int]bool)
+	var strategyParts []string
+
+	for _, g := range groups {
+		if len(g.values) < sc.Config.MinItemsToAnalyze {
+			for _, idx := range g.indices {
+				keepIndices[idx] = true
+			}
+			continue
+		}
+
+		switch g.key {
+		case "dict":
+			result := sc.CrushArray(g.values, queryContext, bias)
+			crushedKeys := make(map[string]bool, len(result.Items))
+			for _, raw := range result.Items {
+				crushedKeys[string(raw)] = true
+			}
+			for i, idx := range g.indices {
+				if crushedKeys[string(g.values[i])] {
+					keepIndices[idx] = true
+				}
+			}
+			strategyParts = append(strategyParts, fmt.Sprintf("dict:%d->%d", len(g.values), len(result.Items)))
+
+		case "str":
+			strs := make([]string, 0, len(g.values))
+			for _, raw := range g.values {
+				var s string
+				if err := json.Unmarshal(raw, &s); err == nil {
+					strs = append(strs, s)
+				}
+			}
+			crushed, _ := CrushStringArray(strs, &sc.Config, bias)
+			crushedSet := make(map[string]bool, len(crushed))
+			for _, s := range crushed {
+				crushedSet[s] = true
+			}
+			for i, idx := range g.indices {
+				var s string
+				if err := json.Unmarshal(g.values[i], &s); err == nil && crushedSet[s] {
+					keepIndices[idx] = true
+				}
+			}
+			strategyParts = append(strategyParts, fmt.Sprintf("str:%d->%d", len(g.values), len(crushed)))
+
+		case "number":
+			strItems := make([]string, len(g.values))
+			for i, raw := range g.values {
+				strItems[i] = string(raw)
+			}
+			_, kFirst, kLast, _ := ComputeKSplit(strItems, &sc.Config, bias)
+			kFirst = min(kFirst, len(g.values))
+			kLast = min(kLast, len(g.values)-kFirst)
+			for i := 0; i < kFirst; i++ {
+				keepIndices[g.indices[i]] = true
+			}
+			for i := len(g.indices) - kLast; i < len(g.indices); i++ {
+				if i >= 0 {
+					keepIndices[g.indices[i]] = true
+				}
+			}
+
+			// Outliers via finite-only stats (matches Rust crush_mixed_array).
+			var finite []float64
+			for _, raw := range g.values {
+				var num float64
+				if err := json.Unmarshal(raw, &num); err == nil && !math.IsInf(num, 0) && !math.IsNaN(num) {
+					finite = append(finite, num)
+				}
+			}
+			if len(finite) > 1 {
+				if meanV, ok := Mean(finite); ok {
+					if stdV, ok := SampleStdev(finite); ok && stdV > 0 {
+						threshold := sc.Config.VarianceThreshold * stdV
+						for i, raw := range g.values {
+							var num float64
+							if err := json.Unmarshal(raw, &num); err == nil && !math.IsInf(num, 0) && !math.IsNaN(num) {
+								if math.Abs(num-meanV) > threshold {
+									keepIndices[g.indices[i]] = true
+								}
+							}
+						}
+					}
+				}
+			}
+			strategyParts = append(strategyParts, fmt.Sprintf("num:%d", len(g.values)))
+
+		default:
+			// list / bool / none / other: keep all items.
+			for _, idx := range g.indices {
+				keepIndices[idx] = true
+			}
+		}
+	}
+
+	// Reassemble in original order.
+	sorted := setToSortedSlice(keepIndices)
+
+	strategy := fmt.Sprintf("mixed:adaptive(%d->%d,%s)", n, len(sorted), strings.Join(strategyParts, ","))
+	return sorted, strategy
 }

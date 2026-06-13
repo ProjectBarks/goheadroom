@@ -7,9 +7,11 @@ package diffcompressor
 
 import (
 	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/uber/goheadroom/ccr"
@@ -123,7 +125,7 @@ func (dc *DiffCompressor) CompressWithStore(content, context string, store ccr.C
 		HunksDroppedPerFile: make(map[string]int),
 	}
 
-	lines := strings.Split(content, "\n")
+	lines := splitLines(content)
 	originalLineCount := len(lines)
 	stats.InputLines = originalLineCount
 
@@ -252,7 +254,17 @@ func (dc *DiffCompressor) CompressWithStore(content, context string, store ccr.C
 	var cacheKey *string
 	if dc.config.EnableCCR && float64(compressedLineCount) < float64(originalLineCount)*savingsThreshold {
 		key := md5Hex24(content)
-		compressedOutput += "\n" + fmt.Sprintf("[%d lines compressed to %d. Retrieve full diff: hash=%s]", originalLineCount, compressedLineCount, key)
+		var cb strings.Builder
+		cb.Grow(len(compressedOutput) + 80)
+		cb.WriteString(compressedOutput)
+		cb.WriteString("\n[")
+		cb.WriteString(strconv.Itoa(originalLineCount))
+		cb.WriteString(" lines compressed to ")
+		cb.WriteString(strconv.Itoa(compressedLineCount))
+		cb.WriteString(". Retrieve full diff: hash=")
+		cb.WriteString(key)
+		cb.WriteByte(']')
+		compressedOutput = cb.String()
 		if store != nil {
 			store.Put(key, []byte(content))
 		}
@@ -442,13 +454,13 @@ func parseDiff(lines []string) *parsedDiff {
 
 		// Hunk content.
 		if currentHunk != nil {
-			if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
+			if len(line) > 0 && line[0] == '+' && !strings.HasPrefix(line, "+++") {
 				currentHunk.additions++
 				currentHunk.lines = append(currentHunk.lines, line)
-			} else if strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---") {
+			} else if len(line) > 0 && line[0] == '-' && !strings.HasPrefix(line, "---") {
 				currentHunk.deletions++
 				currentHunk.lines = append(currentHunk.lines, line)
-			} else if strings.HasPrefix(line, " ") || line == "" {
+			} else if (len(line) > 0 && line[0] == ' ') || line == "" {
 				currentHunk.contextLines++
 				currentHunk.lines = append(currentHunk.lines, line)
 			} else {
@@ -485,7 +497,21 @@ func scoreHunks(files []*diffFile, context string) {
 				score = ScoreChangeDensityCap
 			}
 
-			hunkContentLower := strings.ToLower(strings.Join(hunk.lines, "\n"))
+			// Build lowered hunk content once using a builder instead of
+			// strings.Join + strings.ToLower which allocates two large strings.
+			var b strings.Builder
+			totalLen := 0
+			for _, l := range hunk.lines {
+				totalLen += len(l) + 1
+			}
+			b.Grow(totalLen)
+			for i, l := range hunk.lines {
+				if i > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(strings.ToLower(l))
+			}
+			hunkContentLower := b.String()
 
 			for _, word := range contextWords {
 				if len(word) > ScoreContextMinWordLen && strings.Contains(hunkContentLower, word) {
@@ -588,8 +614,7 @@ func selectHunks(hunks []*diffHunk, maxPerFile int) ([]*diffHunk, []*diffHunk) {
 func extractLineNumber(header string) int {
 	m := hunkNewRangeRe.FindStringSubmatch(header)
 	if m != nil {
-		var n int
-		fmt.Sscanf(m[1], "%d", &n)
+		n, _ := strconv.Atoi(m[1])
 		return n
 	}
 	return 0
@@ -601,7 +626,7 @@ func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
 	// Find indices of +/- lines.
 	var changePositions []int
 	for i, line := range hunk.lines {
-		if strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") {
+		if len(line) > 0 && (line[0] == '+' || line[0] == '-') {
 			changePositions = append(changePositions, i)
 		}
 	}
@@ -622,8 +647,9 @@ func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
 		}
 	}
 
-	// Build set of indices to keep.
-	keep := make(map[int]bool)
+	// Build bitset of indices to keep (avoids map allocation).
+	n := len(hunk.lines)
+	keep := make([]bool, n)
 	for _, pos := range changePositions {
 		keep[pos] = true
 		lo := pos - maxContext
@@ -634,8 +660,8 @@ func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
 			keep[i] = true
 		}
 		hi := pos + maxContext + 1
-		if hi > len(hunk.lines) {
-			hi = len(hunk.lines)
+		if hi > n {
+			hi = n
 		}
 		for i := pos + 1; i < hi; i++ {
 			keep[i] = true
@@ -644,23 +670,23 @@ func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
 
 	// Always keep `\ No newline at end of file` markers.
 	for i, line := range hunk.lines {
-		if strings.HasPrefix(line, `\`) {
+		if len(line) > 0 && line[0] == '\\' {
 			keep[i] = true
 		}
 	}
 
 	// Collect kept lines in order.
-	var newLines []string
+	newLines := make([]string, 0, len(changePositions)*3)
 	var additions, deletions, contextLines int
-	for i := 0; i < len(hunk.lines); i++ {
+	for i := 0; i < n; i++ {
 		if !keep[i] {
 			continue
 		}
 		line := hunk.lines[i]
 		newLines = append(newLines, line)
-		if strings.HasPrefix(line, "+") {
+		if len(line) > 0 && line[0] == '+' {
 			additions++
-		} else if strings.HasPrefix(line, "-") {
+		} else if len(line) > 0 && line[0] == '-' {
 			deletions++
 		} else {
 			contextLines++
@@ -680,56 +706,90 @@ func reduceContext(hunk *diffHunk, maxContext int) *diffHunk {
 // ── Output formatter ────────────────────────────────────────────────
 
 func formatOutput(preDiffLines []string, files []*diffFile, filesAffected, totalAdditions, totalDeletions, hunksRemoved int) string {
-	var outLines []string
+	// Estimate capacity: count total lines and approximate average line length.
+	totalLines := len(preDiffLines)
+	for _, f := range files {
+		totalLines += 1 // header
+		totalLines += len(f.renameLines)
+		totalLines += 3 // mode/binary/old/new file lines
+		for _, h := range f.hunks {
+			totalLines += 1 + len(h.lines)
+		}
+	}
+	totalLines += 2 // summary footer
 
-	for _, l := range preDiffLines {
-		outLines = append(outLines, l)
+	var b strings.Builder
+	b.Grow(totalLines * 80) // rough estimate
+
+	for i, l := range preDiffLines {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(l)
 	}
 
+	needNewline := len(preDiffLines) > 0
 	for _, f := range files {
-		outLines = append(outLines, f.header)
+		if needNewline {
+			b.WriteByte('\n')
+		}
+		b.WriteString(f.header)
+		needNewline = true
 
 		for _, l := range f.renameLines {
-			outLines = append(outLines, l)
+			b.WriteByte('\n')
+			b.WriteString(l)
 		}
 
 		if f.isNewFile {
-			outLines = append(outLines, "new file mode 100644")
+			b.WriteString("\nnew file mode 100644")
 		} else if f.isDeletedFile {
-			outLines = append(outLines, "deleted file mode 100644")
+			b.WriteString("\ndeleted file mode 100644")
 		}
 
 		if f.isBinary {
-			outLines = append(outLines, "Binary files differ")
+			b.WriteString("\nBinary files differ")
 			continue
 		}
 
 		if f.oldFile != "" {
-			outLines = append(outLines, f.oldFile)
+			b.WriteByte('\n')
+			b.WriteString(f.oldFile)
 		}
 		if f.newFile != "" {
-			outLines = append(outLines, f.newFile)
+			b.WriteByte('\n')
+			b.WriteString(f.newFile)
 		}
 
 		for _, h := range f.hunks {
-			outLines = append(outLines, h.header)
-			outLines = append(outLines, h.lines...)
+			b.WriteByte('\n')
+			b.WriteString(h.header)
+			for _, l := range h.lines {
+				b.WriteByte('\n')
+				b.WriteString(l)
+			}
 		}
 	}
 
 	// Summary footer.
 	if hunksRemoved > 0 || filesAffected > 0 {
-		parts := []string{
-			fmt.Sprintf("%d files changed", filesAffected),
-			fmt.Sprintf("+%d -%d lines", totalAdditions, totalDeletions),
-		}
+		b.WriteByte('\n')
+		b.WriteByte('[')
+		b.WriteString(strconv.Itoa(filesAffected))
+		b.WriteString(" files changed, +")
+		b.WriteString(strconv.Itoa(totalAdditions))
+		b.WriteString(" -")
+		b.WriteString(strconv.Itoa(totalDeletions))
+		b.WriteString(" lines")
 		if hunksRemoved > 0 {
-			parts = append(parts, fmt.Sprintf("%d hunks omitted", hunksRemoved))
+			b.WriteString(", ")
+			b.WriteString(strconv.Itoa(hunksRemoved))
+			b.WriteString(" hunks omitted")
 		}
-		outLines = append(outLines, fmt.Sprintf("[%s]", strings.Join(parts, ", ")))
+		b.WriteByte(']')
 	}
 
-	return strings.Join(outLines, "\n")
+	return b.String()
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -748,6 +808,26 @@ func countSplitLines(s string) int {
 
 func md5Hex24(s string) string {
 	h := md5.Sum([]byte(s))
-	hex := fmt.Sprintf("%x", h)
-	return hex[:24]
+	dst := make([]byte, hex.EncodedLen(len(h)))
+	hex.Encode(dst, h[:])
+	return string(dst[:24])
+}
+
+// splitLines splits content on newlines, returning substrings of the
+// original string (no copies). This is the same as strings.Split but
+// avoids allocating new string headers for every line -- the returned
+// strings share the backing array of content.
+func splitLines(content string) []string {
+	n := strings.Count(content, "\n") + 1
+	lines := make([]string, 0, n)
+	for {
+		idx := strings.IndexByte(content, '\n')
+		if idx < 0 {
+			lines = append(lines, content)
+			break
+		}
+		lines = append(lines, content[:idx])
+		content = content[idx+1:]
+	}
+	return lines
 }
