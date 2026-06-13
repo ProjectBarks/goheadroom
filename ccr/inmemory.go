@@ -29,9 +29,13 @@ func NewInMemoryStore() *InMemoryStore {
 
 // NewInMemoryStoreWithOptions creates an InMemoryStore with the given capacity and TTL.
 func NewInMemoryStoreWithOptions(capacity int, ttl time.Duration) *InMemoryStore {
+	initSize := 16
+	if capacity < initSize {
+		initSize = capacity
+	}
 	return &InMemoryStore{
-		data:     make(map[string]entry, capacity),
-		ring:     make([]string, capacity),
+		data:     make(map[string]entry, initSize),
+		ring:     make([]string, initSize),
 		capacity: capacity,
 		ttl:      ttl,
 	}
@@ -50,18 +54,38 @@ func (s *InMemoryStore) Put(key string, value []byte) {
 		return
 	}
 
-	// Evict oldest if at capacity.
+	ringLen := len(s.ring)
+
 	for len(s.data) >= s.capacity && s.count > 0 {
 		oldest := s.ring[s.head]
-		s.head = (s.head + 1) % s.capacity
+		s.head = (s.head + 1) % ringLen
 		s.count--
 		delete(s.data, oldest)
 	}
 
+	if s.count >= ringLen {
+		s.growRing()
+		ringLen = len(s.ring)
+	}
+
 	s.data[key] = entry{value: value, expiresAt: now.Add(s.ttl)}
-	tail := (s.head + s.count) % s.capacity
+	tail := (s.head + s.count) % ringLen
 	s.ring[tail] = key
 	s.count++
+}
+
+func (s *InMemoryStore) growRing() {
+	oldLen := len(s.ring)
+	newLen := oldLen * 2
+	if newLen > s.capacity {
+		newLen = s.capacity
+	}
+	newRing := make([]string, newLen)
+	for i := 0; i < s.count; i++ {
+		newRing[i] = s.ring[(s.head+i)%oldLen]
+	}
+	s.ring = newRing
+	s.head = 0
 }
 
 // Get retrieves a value. Returns (nil, false) on miss or expiry.

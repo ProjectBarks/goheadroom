@@ -125,11 +125,10 @@ func (dc *DiffCompressor) CompressWithStore(content, context string, store ccr.C
 		HunksDroppedPerFile: make(map[string]int),
 	}
 
-	lines := strings.Split(content, "\n")
-	originalLineCount := len(lines)
+	li := newLineIndex(content)
+	originalLineCount := li.lineCount()
 	stats.InputLines = originalLineCount
 
-	// Short-circuit 1: input below CCR threshold -> pass through unchanged.
 	if originalLineCount < dc.config.MinLinesForCCR {
 		stats.OutputLines = originalLineCount
 		stats.CompressionRatio = 1.0
@@ -138,8 +137,7 @@ func (dc *DiffCompressor) CompressWithStore(content, context string, store ccr.C
 		return passThroughResult(content, originalLineCount), stats
 	}
 
-	// Parse the unified diff.
-	parsed := parseDiff(lines)
+	parsed := parseDiff(&li)
 	preDiffLines := parsed.preDiffLines
 	diffFiles := parsed.files
 	stats.ParseWarnings = parsed.parseWarnings
@@ -376,6 +374,43 @@ func isDiffHeader(line string) bool {
 	return diffGitRe.MatchString(line) || diffCombinedRe.MatchString(line) || diffCCRe.MatchString(line)
 }
 
+// ── Line index (avoids []string allocation from strings.Split) ──────
+
+type lineIndex struct {
+	content string
+	offsets []int32
+}
+
+func newLineIndex(content string) lineIndex {
+	n := strings.Count(content, "\n") + 1
+	offsets := make([]int32, 0, n+1)
+	offsets = append(offsets, 0)
+	for i := 0; i < len(content); i++ {
+		if content[i] == '\n' {
+			offsets = append(offsets, int32(i+1))
+		}
+	}
+	return lineIndex{content: content, offsets: offsets}
+}
+
+func (li *lineIndex) line(i int) string {
+	start := int(li.offsets[i])
+	var end int
+	if i+1 < len(li.offsets) {
+		end = int(li.offsets[i+1]) - 1
+	} else {
+		end = len(li.content)
+	}
+	if end < start {
+		end = start
+	}
+	return li.content[start:end]
+}
+
+func (li *lineIndex) lineCount() int {
+	return len(li.offsets)
+}
+
 // ── Parser ──────────────────────────────────────────────────────────
 
 type parsedDiff struct {
@@ -384,14 +419,16 @@ type parsedDiff struct {
 	parseWarnings []string
 }
 
-func parseDiff(lines []string) *parsedDiff {
+func parseDiff(li *lineIndex) *parsedDiff {
 	var files []*diffFile
 	var currentFile *diffFile
 	var currentHunk *diffHunk
 	var preDiffLines []string
 	var warnings []string
 
-	for _, line := range lines {
+	n := li.lineCount()
+	for idx := 0; idx < n; idx++ {
+		line := li.line(idx)
 		lineLen := len(line)
 
 		// Fast path: when inside a hunk, the vast majority of lines are
