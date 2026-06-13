@@ -7,7 +7,6 @@ import (
 	"math"
 	"strconv"
 	"unicode/utf8"
-	"unsafe"
 )
 
 // marshalOrderedJSON serializes value as JSON, preserving the key order from originalJSON.
@@ -48,6 +47,219 @@ func extractKeyOrder(data []byte) (*keyOrderNode, error) {
 		return nil, err
 	}
 	return node, nil
+}
+
+type rawBackedArray struct {
+	items    []interface{}
+	rawItems []json.RawMessage
+}
+
+func unmarshalPreservingArrays(data []byte) (interface{}, error) {
+	s := &jsonValueScanner{data: data, pos: 0}
+	s.skipWhitespace()
+	if s.pos >= len(s.data) {
+		return nil, fmt.Errorf("unexpected end of JSON")
+	}
+	val, err := s.parseValue()
+	if err != nil {
+		return nil, err
+	}
+	s.skipWhitespace()
+	if s.pos < len(s.data) {
+		return nil, fmt.Errorf("trailing data at pos %d", s.pos)
+	}
+	return val, nil
+}
+
+type jsonValueScanner struct {
+	data []byte
+	pos  int
+}
+
+func (s *jsonValueScanner) parseValue() (interface{}, error) {
+	s.skipWhitespace()
+	if s.pos >= len(s.data) {
+		return nil, fmt.Errorf("unexpected end of JSON")
+	}
+	switch s.data[s.pos] {
+	case '{':
+		return s.parseObject()
+	case '[':
+		return s.parseArray()
+	case '"':
+		return s.parseString()
+	case 't':
+		if s.pos+4 <= len(s.data) && s.data[s.pos+1] == 'r' && s.data[s.pos+2] == 'u' && s.data[s.pos+3] == 'e' {
+			s.pos += 4
+			return true, nil
+		}
+		return nil, fmt.Errorf("invalid JSON at pos %d", s.pos)
+	case 'f':
+		if s.pos+5 <= len(s.data) && s.data[s.pos+1] == 'a' && s.data[s.pos+2] == 'l' && s.data[s.pos+3] == 's' && s.data[s.pos+4] == 'e' {
+			s.pos += 5
+			return false, nil
+		}
+		return nil, fmt.Errorf("invalid JSON at pos %d", s.pos)
+	case 'n':
+		if s.pos+4 <= len(s.data) && s.data[s.pos+1] == 'u' && s.data[s.pos+2] == 'l' && s.data[s.pos+3] == 'l' {
+			s.pos += 4
+			return nil, nil
+		}
+		return nil, fmt.Errorf("invalid JSON at pos %d", s.pos)
+	default:
+		return s.parseNumber()
+	}
+}
+
+func (s *jsonValueScanner) parseObject() (map[string]interface{}, error) {
+	s.pos++
+	s.skipWhitespace()
+	m := make(map[string]interface{})
+	if s.pos < len(s.data) && s.data[s.pos] == '}' {
+		s.pos++
+		return m, nil
+	}
+	for {
+		s.skipWhitespace()
+		if s.pos >= len(s.data) || s.data[s.pos] != '"' {
+			return nil, fmt.Errorf("expected string key at pos %d", s.pos)
+		}
+		key, err := s.parseString()
+		if err != nil {
+			return nil, err
+		}
+		s.skipWhitespace()
+		if s.pos >= len(s.data) || s.data[s.pos] != ':' {
+			return nil, fmt.Errorf("expected ':' at pos %d", s.pos)
+		}
+		s.pos++
+		val, err := s.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		m[key] = val
+		s.skipWhitespace()
+		if s.pos >= len(s.data) {
+			return nil, fmt.Errorf("unexpected end of object")
+		}
+		if s.data[s.pos] == '}' {
+			s.pos++
+			return m, nil
+		}
+		if s.data[s.pos] == ',' {
+			s.pos++
+			continue
+		}
+		return nil, fmt.Errorf("expected ',' or '}' at pos %d", s.pos)
+	}
+}
+
+func (s *jsonValueScanner) parseArray() (interface{}, error) {
+	s.pos++
+	s.skipWhitespace()
+	if s.pos < len(s.data) && s.data[s.pos] == ']' {
+		s.pos++
+		return &rawBackedArray{}, nil
+	}
+	var items []interface{}
+	var rawItems []json.RawMessage
+	for {
+		s.skipWhitespace()
+		start := s.pos
+		val, err := s.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		end := s.pos
+		raw := make([]byte, end-start)
+		copy(raw, s.data[start:end])
+		items = append(items, val)
+		rawItems = append(rawItems, json.RawMessage(raw))
+		s.skipWhitespace()
+		if s.pos >= len(s.data) {
+			return nil, fmt.Errorf("unexpected end of array")
+		}
+		if s.data[s.pos] == ']' {
+			s.pos++
+			return &rawBackedArray{items: items, rawItems: rawItems}, nil
+		}
+		if s.data[s.pos] == ',' {
+			s.pos++
+			continue
+		}
+		return nil, fmt.Errorf("expected ',' or ']' at pos %d", s.pos)
+	}
+}
+
+func (s *jsonValueScanner) parseString() (string, error) {
+	if s.pos >= len(s.data) || s.data[s.pos] != '"' {
+		return "", fmt.Errorf("expected '\"' at pos %d", s.pos)
+	}
+	s.pos++
+	start := s.pos
+	hasEscape := false
+	for s.pos < len(s.data) {
+		c := s.data[s.pos]
+		if c == '\\' {
+			hasEscape = true
+			s.pos++
+			if s.pos >= len(s.data) {
+				return "", fmt.Errorf("unexpected end of string escape")
+			}
+			if s.data[s.pos] == 'u' {
+				s.pos += 4
+				if s.pos > len(s.data) {
+					return "", fmt.Errorf("unexpected end of unicode escape")
+				}
+			} else {
+				s.pos++
+			}
+			continue
+		}
+		if c == '"' {
+			raw := s.data[start:s.pos]
+			s.pos++
+			if !hasEscape {
+				return string(raw), nil
+			}
+			quoted := s.data[start-1 : s.pos]
+			var result string
+			if err := json.Unmarshal(quoted, &result); err != nil {
+				return "", err
+			}
+			return result, nil
+		}
+		s.pos++
+	}
+	return "", fmt.Errorf("unterminated string")
+}
+
+func (s *jsonValueScanner) parseNumber() (float64, error) {
+	start := s.pos
+	for s.pos < len(s.data) {
+		c := s.data[s.pos]
+		if c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' || (c >= '0' && c <= '9') {
+			s.pos++
+			continue
+		}
+		break
+	}
+	f, err := strconv.ParseFloat(string(s.data[start:s.pos]), 64)
+	if err != nil {
+		return 0, err
+	}
+	return f, nil
+}
+
+func (s *jsonValueScanner) skipWhitespace() {
+	for s.pos < len(s.data) {
+		c := s.data[s.pos]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			s.pos++
+			continue
+		}
+		break
+	}
 }
 
 // jsonScanner is a lightweight JSON scanner that extracts key order
@@ -240,7 +452,7 @@ func (s *jsonScanner) parseString() (string, error) {
 				// Fast path: no escapes, return string backed by the original
 				// byte slice without copying. The data slice lives for the
 				// duration of the marshal call, so this is safe.
-				return unsafe.String(&raw[0], len(raw)), nil
+				return string(raw), nil
 			}
 			// Slow path: unescape using json.Unmarshal on the quoted string.
 			quoted := s.data[start-1 : s.pos] // include quotes
@@ -442,6 +654,9 @@ func writeOrdered(buf *bytes.Buffer, value interface{}, orderNode *keyOrderNode)
 
 	case []interface{}:
 		return writeOrderedArray(buf, v, orderNode)
+
+	case *rawBackedArray:
+		return writeOrderedArray(buf, v.items, orderNode)
 
 	case string:
 		writeJSONString(buf, v)

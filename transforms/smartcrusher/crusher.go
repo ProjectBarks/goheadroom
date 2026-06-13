@@ -70,14 +70,15 @@ func (sc *SmartCrusher) Crush(content string, query string, bias float64) CrushR
 // SmartCrushContent parses JSON, recursively processes, re-serializes.
 // Returns (crushedContent, wasModified, info).
 func (sc *SmartCrusher) SmartCrushContent(content string, queryContext string, bias float64) (string, bool, string) {
-	var parsed interface{}
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+	contentBytes := []byte(content)
+	parsed, err := unmarshalPreservingArrays(contentBytes)
+	if err != nil {
 		return content, false, ""
 	}
 
 	crushed, info := sc.ProcessValue(parsed, 0, queryContext, bias)
 
-	result, err := marshalOrderedJSON([]byte(content), crushed)
+	result, err := marshalOrderedJSON(contentBytes, crushed)
 	if err != nil {
 		return content, false, ""
 	}
@@ -98,78 +99,11 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 	var infoParts []string
 
 	switch v := value.(type) {
+	case *rawBackedArray:
+		return sc.processArray(v.items, v.rawItems, depth, queryContext, bias, infoParts)
+
 	case []interface{}:
-		n := len(v)
-		if n >= sc.Config.MinItemsToAnalyze {
-			arrType := classifyInterfaceArray(v)
-			switch arrType {
-			case ArrayDictArray:
-				rawItems := interfaceToRawMessages(v)
-				result := sc.CrushArrayWithParsed(rawItems, v, queryContext, bias)
-				if result.Compacted != nil {
-					infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->len="+strconv.Itoa(len(*result.Compacted))+")")
-					return *result.Compacted, strings.Join(infoParts, ",")
-				}
-				// Use kept indices to pick from original []interface{} slice,
-				// avoiding rawMessagesToInterface unmarshal round-trip.
-				if result.KeptIndices != nil {
-					kept := make([]interface{}, len(result.KeptIndices))
-					for i, idx := range result.KeptIndices {
-						kept[i] = v[idx]
-					}
-					infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(kept))+")")
-					return kept, strings.Join(infoParts, ",")
-				}
-				infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(result.Items))+")")
-				return rawMessagesToInterface(result.Items), strings.Join(infoParts, ",")
-
-			case ArrayStringArray:
-				strs := make([]string, 0, n)
-				for _, item := range v {
-					if s, ok := item.(string); ok {
-						strs = append(strs, s)
-					}
-				}
-				crushed, strategy := CrushStringArray(strs, &sc.Config, bias)
-				infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(crushed))+")")
-				result := make([]interface{}, len(crushed))
-				for i, s := range crushed {
-					result[i] = s
-				}
-				return result, strings.Join(infoParts, ",")
-
-			case ArrayNumberArray:
-				rawItems := interfaceToRawMessages(v)
-				keptIndices, strategy := crushNumberArrayIndices(rawItems, &sc.Config, bias)
-				infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(keptIndices))+")")
-				kept := make([]interface{}, len(keptIndices))
-				for i, idx := range keptIndices {
-					kept[i] = v[idx]
-				}
-				return kept, strings.Join(infoParts, ",")
-
-			case ArrayMixedArray:
-				rawItems := interfaceToRawMessages(v)
-				keptIndices, strategy := sc.crushMixedArrayIndices(rawItems, v, queryContext, bias)
-				infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(keptIndices))+")")
-				kept := make([]interface{}, len(keptIndices))
-				for i, idx := range keptIndices {
-					kept[i] = v[idx]
-				}
-				return kept, strings.Join(infoParts, ",")
-			}
-		}
-
-		// Below threshold or not crushable: recurse into items.
-		processed := make([]interface{}, n)
-		for i, item := range v {
-			pItem, pInfo := sc.ProcessValue(item, depth+1, queryContext, bias)
-			processed[i] = pItem
-			if pInfo != "" {
-				infoParts = append(infoParts, pInfo)
-			}
-		}
-		return processed, strings.Join(infoParts, ",")
+		return sc.processArray(v, nil, depth, queryContext, bias, infoParts)
 
 	case map[string]interface{}:
 		// Recurse into values, modifying in place to avoid map allocation.
@@ -196,6 +130,92 @@ func (sc *SmartCrusher) ProcessValue(value interface{}, depth int, queryContext 
 	default:
 		return value, ""
 	}
+}
+
+func (sc *SmartCrusher) processArray(v []interface{}, precomputedRaw []json.RawMessage, depth int, queryContext string, bias float64, infoParts []string) (interface{}, string) {
+	n := len(v)
+	if n >= sc.Config.MinItemsToAnalyze {
+		arrType := classifyInterfaceArray(v)
+		switch arrType {
+		case ArrayDictArray:
+			var rawItems []json.RawMessage
+			if precomputedRaw != nil {
+				rawItems = precomputedRaw
+			} else {
+				rawItems = interfaceToRawMessages(v)
+			}
+			result := sc.CrushArrayWithParsed(rawItems, v, queryContext, bias)
+			if result.Compacted != nil {
+				infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->len="+strconv.Itoa(len(*result.Compacted))+")")
+				return *result.Compacted, strings.Join(infoParts, ",")
+			}
+			if result.KeptIndices != nil {
+				kept := make([]interface{}, len(result.KeptIndices))
+				for i, idx := range result.KeptIndices {
+					kept[i] = v[idx]
+				}
+				infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(kept))+")")
+				return kept, strings.Join(infoParts, ",")
+			}
+			infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(result.Items))+")")
+			return rawMessagesToInterface(result.Items), strings.Join(infoParts, ",")
+
+		case ArrayStringArray:
+			strs := make([]string, 0, n)
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					strs = append(strs, s)
+				}
+			}
+			crushed, strategy := CrushStringArray(strs, &sc.Config, bias)
+			infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(crushed))+")")
+			result := make([]interface{}, len(crushed))
+			for i, s := range crushed {
+				result[i] = s
+			}
+			return result, strings.Join(infoParts, ",")
+
+		case ArrayNumberArray:
+			var rawItems []json.RawMessage
+			if precomputedRaw != nil {
+				rawItems = precomputedRaw
+			} else {
+				rawItems = interfaceToRawMessages(v)
+			}
+			keptIndices, strategy := crushNumberArrayIndices(rawItems, &sc.Config, bias)
+			infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(keptIndices))+")")
+			kept := make([]interface{}, len(keptIndices))
+			for i, idx := range keptIndices {
+				kept[i] = v[idx]
+			}
+			return kept, strings.Join(infoParts, ",")
+
+		case ArrayMixedArray:
+			var rawItems []json.RawMessage
+			if precomputedRaw != nil {
+				rawItems = precomputedRaw
+			} else {
+				rawItems = interfaceToRawMessages(v)
+			}
+			keptIndices, strategy := sc.crushMixedArrayIndices(rawItems, v, queryContext, bias)
+			infoParts = append(infoParts, strategy+"("+strconv.Itoa(n)+"->"+strconv.Itoa(len(keptIndices))+")")
+			kept := make([]interface{}, len(keptIndices))
+			for i, idx := range keptIndices {
+				kept[i] = v[idx]
+			}
+			return kept, strings.Join(infoParts, ",")
+		}
+	}
+
+	processed := make([]interface{}, n)
+	for i, item := range v {
+		pItem, pInfo := sc.ProcessValue(item, depth+1, queryContext, bias)
+		processed[i] = pItem
+		if pInfo != "" {
+			infoParts = append(infoParts, pInfo)
+		}
+	}
+	return processed, strings.Join(infoParts, ",")
 }
 
 // ExecutePlan executes a CompressionPlan against items.
@@ -496,7 +516,7 @@ func classifyInterfaceArray(items []interface{}) ArrayType {
 			hasString = true
 		case map[string]interface{}:
 			hasObject = true
-		case []interface{}:
+		case []interface{}, *rawBackedArray:
 			hasArray = true
 		case nil:
 			hasNull = true
@@ -568,6 +588,15 @@ func marshalInterfaceValue(buf *bytes.Buffer, v interface{}) {
 				buf.WriteByte(',')
 			}
 			marshalInterfaceValue(buf, item)
+		}
+		buf.WriteByte(']')
+	case *rawBackedArray:
+		buf.WriteByte('[')
+		for i, raw := range val.rawItems {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			buf.Write(raw)
 		}
 		buf.WriteByte(']')
 	case map[string]interface{}:

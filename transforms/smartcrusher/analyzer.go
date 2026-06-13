@@ -6,6 +6,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+
+	"github.com/uber/goheadroom/internal/textutil"
 )
 
 // SmartAnalyzer is the statistical brain that decides whether and how to crush.
@@ -740,17 +742,17 @@ func isISODatetime(s string) bool {
 	if len(b) < 19 {
 		return false
 	}
-	return isDigitByte(b[0]) && isDigitByte(b[1]) && isDigitByte(b[2]) && isDigitByte(b[3]) &&
+	return textutil.IsDigit(b[0]) && textutil.IsDigit(b[1]) && textutil.IsDigit(b[2]) && textutil.IsDigit(b[3]) &&
 		b[4] == '-' &&
-		isDigitByte(b[5]) && isDigitByte(b[6]) &&
+		textutil.IsDigit(b[5]) && textutil.IsDigit(b[6]) &&
 		b[7] == '-' &&
-		isDigitByte(b[8]) && isDigitByte(b[9]) &&
+		textutil.IsDigit(b[8]) && textutil.IsDigit(b[9]) &&
 		(b[10] == 'T' || b[10] == ' ') &&
-		isDigitByte(b[11]) && isDigitByte(b[12]) &&
+		textutil.IsDigit(b[11]) && textutil.IsDigit(b[12]) &&
 		b[13] == ':' &&
-		isDigitByte(b[14]) && isDigitByte(b[15]) &&
+		textutil.IsDigit(b[14]) && textutil.IsDigit(b[15]) &&
 		b[16] == ':' &&
-		isDigitByte(b[17]) && isDigitByte(b[18])
+		textutil.IsDigit(b[17]) && textutil.IsDigit(b[18])
 }
 
 func isISODate(s string) bool {
@@ -758,13 +760,9 @@ func isISODate(s string) bool {
 	if len(b) != 10 {
 		return false
 	}
-	return isDigitByte(b[0]) && isDigitByte(b[1]) && isDigitByte(b[2]) && isDigitByte(b[3]) &&
+	return textutil.IsDigit(b[0]) && textutil.IsDigit(b[1]) && textutil.IsDigit(b[2]) && textutil.IsDigit(b[3]) &&
 		b[4] == '-' &&
-		isDigitByte(b[5]) && isDigitByte(b[6]) &&
+		textutil.IsDigit(b[5]) && textutil.IsDigit(b[6]) &&
 		b[7] == '-' &&
-		isDigitByte(b[8]) && isDigitByte(b[9])
-}
-
-func isDigitByte(b byte) bool {
-	return b >= '0' && b <= '9'
+		textutil.IsDigit(b[8]) && textutil.IsDigit(b[9])
 }

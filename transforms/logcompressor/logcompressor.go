@@ -14,6 +14,7 @@ import (
 	"unicode"
 
 	"github.com/uber/goheadroom/ccr"
+	"github.com/uber/goheadroom/internal/textutil"
 	"github.com/uber/goheadroom/transforms/adaptivesizer"
 )
 
@@ -177,8 +178,8 @@ func (lc *LogCompressor) Compress(content string, bias float64) (LogCompressionR
 // CompressWithStore compresses with optional CCR persistence.
 func (lc *LogCompressor) CompressWithStore(content string, bias float64, store ccr.CcrStore) (LogCompressionResult, LogCompressorStats) {
 	var stats LogCompressorStats
-	li := newLineIndex(content)
-	originalLineCount := li.lineCount()
+	allLines := splitLines(content)
+	originalLineCount := len(allLines)
 
 	if originalLineCount < lc.config.MinLinesForCCR {
 		return LogCompressionResult{
@@ -192,11 +193,14 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 		}, stats
 	}
 
-	format := detectFormatIdx(&li)
+	format := detectFormatLines(allLines)
 	stats.Format = &format
 
-	logLines := lc.parseLinesIdx(&li)
-	selected := lc.selectLines(logLines, bias, &stats)
+	maxK := lc.config.MaxTotalLines
+	adaptiveMax := adaptivesizer.ComputeOptimalK(allLines, bias, 10, &maxK)
+
+	logLines := lc.parseLinesFromStrings(allLines)
+	selected := lc.selectLinesWithMax(logLines, adaptiveMax, &stats)
 	compressedBody, outputStats := lc.formatOutput(selected, logLines)
 	compressed := compressedBody
 
@@ -252,47 +256,6 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 	return result, stats
 }
 
-// ── Line index (avoids []string allocation from strings.Split) ──────
-
-// lineIndex stores byte offsets into the original content string,
-// avoiding the 16-byte-per-entry []string allocation from strings.Split.
-// Each offset is 4 bytes (int32) vs 16 bytes (string header).
-// Substrings returned by line() share the original backing memory.
-type lineIndex struct {
-	content string
-	offsets []int32 // start offset of each line
-}
-
-func newLineIndex(content string) lineIndex {
-	n := strings.Count(content, "\n") + 1
-	offsets := make([]int32, 0, n+1)
-	offsets = append(offsets, 0)
-	for i := 0; i < len(content); i++ {
-		if content[i] == '\n' {
-			offsets = append(offsets, int32(i+1))
-		}
-	}
-	return lineIndex{content: content, offsets: offsets}
-}
-
-func (li *lineIndex) line(i int) string {
-	start := int(li.offsets[i])
-	var end int
-	if i+1 < len(li.offsets) {
-		end = int(li.offsets[i+1]) - 1 // exclude newline
-	} else {
-		end = len(li.content)
-	}
-	if end < start {
-		end = start
-	}
-	return li.content[start:end]
-}
-
-func (li *lineIndex) lineCount() int {
-	return len(li.offsets)
-}
-
 // ── Format detection ────────────────────────────────────────────────
 
 var formatPatterns = []struct {
@@ -310,8 +273,22 @@ var formatPatterns = []struct {
 	{LogFormatMake, []string{"make[", "make:", "gcc ", "g++ ", "clang "}},
 }
 
-func detectFormatIdx(li *lineIndex) LogFormat {
-	sampleN := li.lineCount()
+func splitLines(content string) []string {
+	n := strings.Count(content, "\n") + 1
+	out := make([]string, 0, n)
+	start := 0
+	for i := 0; i < len(content); i++ {
+		if content[i] == '\n' {
+			out = append(out, content[start:i])
+			start = i + 1
+		}
+	}
+	out = append(out, content[start:])
+	return out
+}
+
+func detectFormatLines(lines []string) LogFormat {
+	sampleN := len(lines)
 	if sampleN > 100 {
 		sampleN = 100
 	}
@@ -320,37 +297,8 @@ func detectFormatIdx(li *lineIndex) LogFormat {
 	for _, fp := range formatPatterns {
 		score := 0
 		for i := 0; i < sampleN; i++ {
-			line := li.line(i)
 			for _, pat := range fp.patterns {
-				if strings.Contains(line, pat) {
-					score++
-					break
-				}
-			}
-		}
-		if score > 0 && score > bestScore {
-			bestScore = score
-			bestFormat = fp.format
-		}
-	}
-	if bestScore == 0 {
-		return LogFormatGeneric
-	}
-	return bestFormat
-}
-
-func detectFormat(lines []string) LogFormat {
-	sample := lines
-	if len(sample) > 100 {
-		sample = sample[:100]
-	}
-	var bestFormat LogFormat
-	bestScore := 0
-	for _, fp := range formatPatterns {
-		score := 0
-		for _, line := range sample {
-			for _, pat := range fp.patterns {
-				if strings.Contains(line, pat) {
+				if strings.Contains(lines[i], pat) {
 					score++
 					break
 				}
@@ -369,7 +317,7 @@ func detectFormat(lines []string) LogFormat {
 
 // DetectFormat is exported for testing.
 func DetectFormat(lines []string) LogFormat {
-	return detectFormat(lines)
+	return detectFormatLines(lines)
 }
 
 // ── Level classification ────────────────────────────────────────────
@@ -403,13 +351,9 @@ func classifyLevel(line string) LogLevel {
 }
 
 func isWordBoundary(s string, start, end int) bool {
-	leftOK := start == 0 || !isWordByte(s[start-1])
-	rightOK := end == len(s) || !isWordByte(s[end])
+	leftOK := start == 0 || !textutil.IsWordChar(s[start-1])
+	rightOK := end == len(s) || !textutil.IsWordChar(s[end])
 	return leftOK && rightOK
-}
-
-func isWordByte(b byte) bool {
-	return (b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') || b == '_'
 }
 
 // ── Stack trace detection ───────────────────────────────────────────
@@ -634,69 +578,59 @@ func scoreLogLine(line *LogLine) float32 {
 
 // ── Parse lines ─────────────────────────────────────────────────────
 
-func (lc *LogCompressor) parseLinesIdx(li *lineIndex) []LogLine {
-	n := li.lineCount()
-	out := make([]LogLine, 0, n)
-	var activeFlavor *traceFlavor
+func (lc *LogCompressor) parseLinesFromStrings(lines []string) []LogLine {
+	n := len(lines)
+	out := make([]LogLine, n)
+	var activeFlavor traceFlavor
+	activeSet := false
 	traceLines := 0
 
 	for i := 0; i < n; i++ {
-		line := li.line(i)
-		entry := LogLine{
+		line := lines[i]
+		out[i] = LogLine{
 			LineNumber: i,
 			Content:    line,
 			Level:      classifyLevel(line),
 			IsSummary:  isSummaryLine(line),
 		}
 
-		if activeFlavor != nil {
-			if traceLines >= lc.config.StackTraceMaxLines || traceTerminates(*activeFlavor, line) {
-				activeFlavor = nil
+		if activeSet {
+			if traceLines >= lc.config.StackTraceMaxLines || traceTerminates(activeFlavor, line) {
+				activeSet = false
 				traceLines = 0
-				// Re-check against opener for chained traces.
 				if flavor, ok := detectTraceFlavor(line); ok {
-					f := flavor
-					activeFlavor = &f
+					activeFlavor = flavor
+					activeSet = true
 					traceLines = 1
-					entry.IsStackTrace = true
+					out[i].IsStackTrace = true
 				}
 			} else {
-				entry.IsStackTrace = true
+				out[i].IsStackTrace = true
 				traceLines++
 			}
 		} else if flavor, ok := detectTraceFlavor(line); ok {
-			f := flavor
-			activeFlavor = &f
+			activeFlavor = flavor
+			activeSet = true
 			traceLines = 1
-			entry.IsStackTrace = true
+			out[i].IsStackTrace = true
 		}
 
-		entry.Score = scoreLogLine(&entry)
-		out = append(out, entry)
+		out[i].Score = scoreLogLine(&out[i])
 	}
 	return out
 }
 
-// parseLines is a convenience wrapper used by tests.
 func (lc *LogCompressor) parseLines(lines []string) []LogLine {
-	li := newLineIndex(strings.Join(lines, "\n"))
-	return lc.parseLinesIdx(&li)
+	return lc.parseLinesFromStrings(lines)
 }
 
 // ── Selection ───────────────────────────────────────────────────────
 
-func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *LogCompressorStats) []LogLine {
+func (lc *LogCompressor) selectLinesWithMax(logLines []LogLine, adaptiveMax int, stats *LogCompressorStats) []LogLine {
 	n := len(logLines)
-	allStrings := make([]string, n)
-	for i := range logLines {
-		allStrings[i] = logLines[i].Content
-	}
-	maxK := lc.config.MaxTotalLines
-	adaptiveMax := adaptivesizer.ComputeOptimalK(allStrings, bias, 10, &maxK)
 
-	// Categorize using index slices instead of copying LogLine structs.
 	var errorIdx, failIdx, warnIdx, summaryIdx []int
-	var stackTraces [][]int // each element is a slice of line indices
+	var stackTraces [][]int
 	var currentStack []int
 
 	for i := range logLines {
@@ -723,7 +657,6 @@ func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *Lo
 	}
 	stats.StackTracesSeen = len(stackTraces)
 
-	// Use a bool slice instead of map[int]LogLine for O(1) set membership.
 	sel := make([]bool, n)
 	selCount := 0
 	markSelected := func(idx int) {
@@ -771,8 +704,6 @@ func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *Lo
 		}
 	}
 
-	// Add context lines around every selected entry using the bool slice.
-	// Snapshot which indices are selected before adding context.
 	contextSel := make([]bool, n)
 	for i := 0; i < n; i++ {
 		if sel[i] {
@@ -798,7 +729,6 @@ func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *Lo
 		}
 	}
 
-	// Collect in line-number order (sel is already indexed by line number).
 	ordered := make([]LogLine, 0, selCount)
 	for i := 0; i < n; i++ {
 		if sel[i] {
@@ -806,7 +736,6 @@ func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *Lo
 		}
 	}
 
-	// Apply adaptive cap.
 	if len(ordered) > adaptiveMax {
 		stats.LinesDroppedByGlobalCap += len(ordered) - adaptiveMax
 		sort.SliceStable(ordered, func(i, j int) bool {
@@ -963,7 +892,7 @@ func isHexByte(b byte) bool {
 }
 
 func isWordSlashByte(b byte) bool {
-	return isWordByte(b) || b == '/'
+	return textutil.IsWordChar(b) || b == '/'
 }
 
 // dedupeSimilarIdx deduplicates warning indices by normalized content.
