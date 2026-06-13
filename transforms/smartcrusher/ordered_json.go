@@ -25,9 +25,9 @@ func marshalOrderedJSON(originalJSON []byte, value interface{}) ([]byte, error) 
 		// Fall back to standard marshal if we can't parse the original.
 		return json.Marshal(value)
 	}
-	// Pre-allocate buffer with capacity matching original JSON size.
-	buf := bytes.NewBuffer(make([]byte, 0, len(originalJSON)))
-	if err := writeOrdered(buf, value, orderTree); err != nil {
+	var buf bytes.Buffer
+	buf.Grow(len(originalJSON))
+	if err := writeOrdered(&buf, value, orderTree); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -123,7 +123,7 @@ func (s *jsonValueScanner) parseObject() (map[string]interface{}, error) {
 		s.pos++
 		return make(map[string]interface{}, 0), nil
 	}
-	m := make(map[string]interface{}, 8)
+	m := make(map[string]interface{}, 4)
 	for {
 		s.skipWhitespace()
 		if s.pos >= len(s.data) || s.data[s.pos] != '"' {
@@ -166,8 +166,9 @@ func (s *jsonValueScanner) parseArray() (interface{}, error) {
 		s.pos++
 		return &rawBackedArray{}, nil
 	}
-	items := make([]interface{}, 0, 8)
-	rawItems := make([]json.RawMessage, 0, 8)
+	cap := estimateArrayLen(s.data[s.pos:])
+	items := make([]interface{}, 0, cap)
+	rawItems := make([]json.RawMessage, 0, cap)
 	for {
 		s.skipWhitespace()
 		start := s.pos
@@ -262,6 +263,50 @@ func (s *jsonValueScanner) skipWhitespace() {
 		}
 		break
 	}
+}
+
+func estimateArrayLen(data []byte) int {
+	depth := 0
+	count := 1
+	inString := false
+	limit := len(data)
+	if limit > 4096 {
+		limit = 4096
+	}
+	for i := 0; i < limit; i++ {
+		c := data[i]
+		if inString {
+			if c == '\\' {
+				i++
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth < 0 {
+				return count
+			}
+		case ',':
+			if depth == 0 {
+				count++
+			}
+		}
+	}
+	avgItemLen := limit / count
+	if avgItemLen > 0 {
+		estimated := len(data) / avgItemLen
+		if estimated > count {
+			return estimated
+		}
+	}
+	return count
 }
 
 // jsonScanner is a lightweight JSON scanner that extracts key order

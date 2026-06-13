@@ -536,99 +536,71 @@ var codeLanguages = []langMatcher{
 // Log/build output matchers (replace logPatterns []*regexp.Regexp)
 // ---------------------------------------------------------------------------
 
-// logMatcher is a single log-detection pattern. isError marks patterns at
-// indices 0-1 in the original logPatterns slice.
-type logMatcher struct {
-	match   func(line string) bool
-	isError bool
-}
+var errorKeywords = []string{"error", "fail", "failed", "fatal", "critical"}
+var warnKeywords = []string{"warning", "warn"}
+var infoKeywords = []string{"info", "debug", "trace"}
 
-var logMatchers = []logMatcher{
-	// 0: (?i)\b(ERROR|FAIL|FAILED|FATAL|CRITICAL)\b
-	{func(line string) bool {
-		return textutil.ContainsWordCI(line, []string{"error", "fail", "failed", "fatal", "critical"})
-	}, true},
-	// 1: (?i)\b(WARN|WARNING)\b
-	{func(line string) bool {
-		return textutil.ContainsWordCI(line, []string{"warning", "warn"})
-	}, true},
-	// 2: (?i)\b(INFO|DEBUG|TRACE)\b
-	{func(line string) bool {
-		return textutil.ContainsWordCI(line, []string{"info", "debug", "trace"})
-	}, false},
-	// 3: ^\s*\d{4}-\d{2}-\d{2}
-	{func(line string) bool {
-		s := textutil.SkipLineWhitespace(line)
-		// need at least 10 chars: YYYY-MM-DD
-		if s+10 > len(line) {
-			return false
-		}
-		return textutil.IsDigit(line[s]) && textutil.IsDigit(line[s+1]) && textutil.IsDigit(line[s+2]) && textutil.IsDigit(line[s+3]) &&
-			line[s+4] == '-' && textutil.IsDigit(line[s+5]) && textutil.IsDigit(line[s+6]) &&
-			line[s+7] == '-' && textutil.IsDigit(line[s+8]) && textutil.IsDigit(line[s+9])
-	}, false},
-	// 4: ^\s*\[\d{2}:\d{2}:\d{2}\]
-	{func(line string) bool {
-		s := textutil.SkipLineWhitespace(line)
-		// need [HH:MM:SS] = 10 chars
-		if s+10 > len(line) {
-			return false
-		}
-		return line[s] == '[' && textutil.IsDigit(line[s+1]) && textutil.IsDigit(line[s+2]) &&
-			line[s+3] == ':' && textutil.IsDigit(line[s+4]) && textutil.IsDigit(line[s+5]) &&
-			line[s+6] == ':' && textutil.IsDigit(line[s+7]) && textutil.IsDigit(line[s+8]) &&
-			line[s+9] == ']'
-	}, false},
-	// 5: ^={3,}|^-{3,}
-	{func(line string) bool {
-		if len(line) < 3 {
-			return false
-		}
+func matchLogLine(line string) (matched bool, isError bool) {
+	if textutil.ContainsWordCI(line, errorKeywords) {
+		return true, true
+	}
+	if textutil.ContainsWordCI(line, warnKeywords) {
+		return true, true
+	}
+	if textutil.ContainsWordCI(line, infoKeywords) {
+		return true, false
+	}
+	s := textutil.SkipLineWhitespace(line)
+	if s+10 <= len(line) &&
+		textutil.IsDigit(line[s]) && textutil.IsDigit(line[s+1]) && textutil.IsDigit(line[s+2]) && textutil.IsDigit(line[s+3]) &&
+		line[s+4] == '-' && textutil.IsDigit(line[s+5]) && textutil.IsDigit(line[s+6]) &&
+		line[s+7] == '-' && textutil.IsDigit(line[s+8]) && textutil.IsDigit(line[s+9]) {
+		return true, false
+	}
+	if s+10 <= len(line) &&
+		line[s] == '[' && textutil.IsDigit(line[s+1]) && textutil.IsDigit(line[s+2]) &&
+		line[s+3] == ':' && textutil.IsDigit(line[s+4]) && textutil.IsDigit(line[s+5]) &&
+		line[s+6] == ':' && textutil.IsDigit(line[s+7]) && textutil.IsDigit(line[s+8]) &&
+		line[s+9] == ']' {
+		return true, false
+	}
+	if len(line) >= 3 {
 		if line[0] == '=' && line[1] == '=' && line[2] == '=' {
-			return true
+			return true, false
 		}
 		if line[0] == '-' && line[1] == '-' && line[2] == '-' {
-			return true
+			return true, false
 		}
-		return false
-	}, false},
-	// 6: ^\s*PASSED|^\s*FAILED|^\s*SKIPPED
-	{func(line string) bool {
-		s := textutil.SkipLineWhitespace(line)
-		return textutil.HasLiteralPrefix(line, s, "PASSED") ||
-			textutil.HasLiteralPrefix(line, s, "FAILED") ||
-			textutil.HasLiteralPrefix(line, s, "SKIPPED")
-	}, false},
-	// 7: ^npm ERR!|^yarn error|^cargo error
-	{func(line string) bool {
-		return textutil.HasLiteralPrefix(line, 0, "npm ERR!") ||
-			textutil.HasLiteralPrefix(line, 0, "yarn error") ||
-			textutil.HasLiteralPrefix(line, 0, "cargo error")
-	}, false},
-	// 8: Traceback \(most recent call last\) - substring match
-	{func(line string) bool {
-		return strings.Contains(line, "Traceback (most recent call last)")
-	}, false},
-	// 9: ^\s*at\s+[\w.$]+\(
-	{func(line string) bool {
-		s := textutil.SkipLineWhitespace(line)
-		if !textutil.HasLiteralPrefix(line, s, "at") {
-			return false
-		}
+	}
+	if textutil.HasLiteralPrefix(line, s, "PASSED") ||
+		textutil.HasLiteralPrefix(line, s, "FAILED") ||
+		textutil.HasLiteralPrefix(line, s, "SKIPPED") {
+		return true, false
+	}
+	if textutil.HasLiteralPrefix(line, 0, "npm ERR!") ||
+		textutil.HasLiteralPrefix(line, 0, "yarn error") ||
+		textutil.HasLiteralPrefix(line, 0, "cargo error") {
+		return true, false
+	}
+	if strings.Contains(line, "Traceback (most recent call last)") {
+		return true, false
+	}
+	if textutil.HasLiteralPrefix(line, s, "at") {
 		j := s + 2
-		if j >= len(line) || (line[j] != ' ' && line[j] != '\t') {
-			return false
+		if j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+			for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
+				j++
+			}
+			k := j
+			for k < len(line) && (textutil.IsWordChar(line[k]) || line[k] == '.' || line[k] == '$') {
+				k++
+			}
+			if k > j && k < len(line) && line[k] == '(' {
+				return true, false
+			}
 		}
-		for j < len(line) && (line[j] == ' ' || line[j] == '\t') {
-			j++
-		}
-		// scan [\w.$]+
-		k := j
-		for k < len(line) && (textutil.IsWordChar(line[k]) || line[k] == '.' || line[k] == '$') {
-			k++
-		}
-		return k > j && k < len(line) && line[k] == '('
-	}, false},
+	}
+	return false, false
 }
 
 
@@ -1041,13 +1013,10 @@ func tryDetectLog(text string) (DetectionResult, bool) {
 			continue
 		}
 		nonEmptyLines++
-		for _, lm := range logMatchers {
-			if lm.match(line) {
-				patternMatches++
-				if lm.isError {
-					errorMatches++
-				}
-				break
+		if matched, isErr := matchLogLine(line); matched {
+			patternMatches++
+			if isErr {
+				errorMatches++
 			}
 		}
 	}

@@ -59,11 +59,7 @@ func matchWordAt(s string, i int, kw string) bool {
 		return false
 	}
 	for j := 1; j < kwLen; j++ {
-		c := s[i+j]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		if c != kw[j] {
+		if s[i+j]|0x20 != kw[j] {
 			return false
 		}
 	}
@@ -85,10 +81,7 @@ func ContainsWordCI(line string, keywords []string) bool {
 		}
 	}
 	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
+		c := line[i] | 0x20
 		if c < 'a' || c > 'z' {
 			continue
 		}
@@ -111,39 +104,36 @@ func ContainsWordCI(line string, keywords []string) bool {
 }
 
 func ContainsAnyWordCI(s string, keywords []string) bool {
-	if len(keywords) == 0 || len(s) == 0 {
+	return ContainsWordCI(s, keywords)
+}
+
+func ContainsSingleWordCI(line, keyword string) bool {
+	kLen := len(keyword)
+	n := len(line)
+	if kLen == 0 || n < kLen {
 		return false
 	}
-	var firstChars [26]bool
-	for _, kw := range keywords {
-		if len(kw) > 0 && kw[0] >= 'a' && kw[0] <= 'z' {
-			firstChars[kw[0]-'a'] = true
-		}
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		if c < 'a' || c > 'z' {
+	first := keyword[0] | 0x20
+	for i := 0; i <= n-kLen; i++ {
+		if line[i]|0x20 != first {
 			continue
 		}
-		if !firstChars[c-'a'] {
+		if i > 0 && IsWordChar(line[i-1]) {
 			continue
 		}
-		if i > 0 {
-			b := s[i-1]
-			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' {
-				continue
+		end := i + kLen
+		if end < n && IsWordChar(line[end]) {
+			continue
+		}
+		match := true
+		for j := 1; j < kLen; j++ {
+			if line[i+j]|0x20 != keyword[j]|0x20 {
+				match = false
+				break
 			}
 		}
-		for _, kw := range keywords {
-			if kw[0] != c {
-				continue
-			}
-			if matchWordAt(s, i, kw) {
-				return true
-			}
+		if match {
+			return true
 		}
 	}
 	return false
@@ -188,24 +178,16 @@ func IndexWordFoldASCII(s, kw string) int {
 	if kwLen == 0 || len(s) < kwLen {
 		return -1
 	}
-	kw0 := kw[0]
+	kw0 := kw[0] | 0x20
 	limit := len(s) - kwLen
 	for i := 0; i <= limit; i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 32
-		}
-		if c != kw0 {
+		if s[i]|0x20 != kw0 {
 			continue
 		}
 
 		match := true
 		for j := 1; j < kwLen; j++ {
-			c := s[i+j]
-			if c >= 'A' && c <= 'Z' {
-				c += 32
-			}
-			if c != kw[j] {
+			if s[i+j]|0x20 != kw[j]|0x20 {
 				match = false
 				break
 			}

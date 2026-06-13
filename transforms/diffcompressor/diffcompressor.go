@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"github.com/uber/goheadroom/ccr"
 	"github.com/uber/goheadroom/internal/textutil"
@@ -1164,7 +1165,8 @@ func countSplitLines(s string) int {
 }
 
 func md5Hex24(s string) string {
-	h := md5.Sum([]byte(s))
+	b := unsafe.Slice(unsafe.StringData(s), len(s))
+	h := md5.Sum(b)
 	var dst [32]byte
 	hex.Encode(dst[:], h[:])
 	return string(dst[:24])

@@ -321,60 +321,25 @@ func DetectFormat(lines []string) LogFormat {
 // ── Level classification ────────────────────────────────────────────
 
 func classifyLevel(line string) LogLevel {
-	if containsWordFold(line, "ERROR") || containsWordFold(line, "FATAL") || containsWordFold(line, "CRITICAL") {
+	if textutil.ContainsSingleWordCI(line, "ERROR") || textutil.ContainsSingleWordCI(line, "FATAL") || textutil.ContainsSingleWordCI(line, "CRITICAL") {
 		return LogLevelError
 	}
-	if containsWordFold(line, "FAILED") || containsWordFold(line, "FAIL") {
+	if textutil.ContainsSingleWordCI(line, "FAILED") || textutil.ContainsSingleWordCI(line, "FAIL") {
 		return LogLevelFail
 	}
-	if containsWordFold(line, "WARNING") || containsWordFold(line, "WARN") {
+	if textutil.ContainsSingleWordCI(line, "WARNING") || textutil.ContainsSingleWordCI(line, "WARN") {
 		return LogLevelWarn
 	}
-	if containsWordFold(line, "INFO") {
+	if textutil.ContainsSingleWordCI(line, "INFO") {
 		return LogLevelInfo
 	}
-	if containsWordFold(line, "DEBUG") {
+	if textutil.ContainsSingleWordCI(line, "DEBUG") {
 		return LogLevelDebug
 	}
-	if containsWordFold(line, "TRACE") {
+	if textutil.ContainsSingleWordCI(line, "TRACE") {
 		return LogLevelTrace
 	}
 	return LogLevelUnknown
-}
-
-func containsWordFold(line, keyword string) bool {
-	kLen := len(keyword)
-	n := len(line)
-	first := keyword[0]
-	firstLo := first | 0x20
-	for i := 0; i <= n-kLen; i++ {
-		c := line[i]
-		if c|0x20 != firstLo {
-			continue
-		}
-		if i > 0 && isWordCharByte(line[i-1]) {
-			continue
-		}
-		end := i + kLen
-		if end < n && isWordCharByte(line[end]) {
-			continue
-		}
-		match := true
-		for j := 1; j < kLen; j++ {
-			if line[i+j]|0x20 != keyword[j]|0x20 {
-				match = false
-				break
-			}
-		}
-		if match {
-			return true
-		}
-	}
-	return false
-}
-
-func isWordCharByte(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
 // ── Stack trace detection ───────────────────────────────────────────
@@ -891,27 +856,11 @@ func normalizeForDedupe(content string) string {
 	prefix := content[:splitAt]
 	suffix := content[splitAt:]
 
-	// Replicate the original three-pass order: digits -> hex -> paths.
-	// Pass 1+2 combined: replace \d+ with N (but 0x[hex]+ with ADDR).
-	var b strings.Builder
-	b.Grow(len(suffix))
+	buf := make([]byte, 0, len(suffix))
 	i := 0
 	for i < len(suffix) {
-		// Check for hex address: 0x[0-9a-fA-F]+ before digit replacement
-		// can mangle the hex digits. In the original code, digit replacement
-		// runs first but hex letters (a-f) aren't \d, so pure-letter hex
-		// like 0xdeadbeef survives. Mixed like 0x1a2b becomes 0xNaN which
-		// then doesn't match hex pattern. We replicate that: only replace
-		// 0x followed by non-digit hex chars as ADDR.
 		if suffix[i] >= '0' && suffix[i] <= '9' {
-			// Check if this is the start of 0x...
 			if suffix[i] == '0' && i+2 < len(suffix) && suffix[i+1] == 'x' && isHexByte(suffix[i+2]) {
-				// Replicate old behavior: digits in the hex part would have
-				// been replaced by N in stage1, then stage2 checks 0x[hex]+.
-				// After stage1, 0xdeadbeef -> 0xdeadbeef (no digits),
-				// 0x1234 -> 0xN (digits replaced), which doesn't match hex pattern.
-				// So: check if ALL chars after 0x are non-digit hex. If so, ADDR.
-				// Otherwise, treat 0 as a digit and let normal digit replacement handle it.
 				j := i + 2
 				allNonDigitHex := true
 				for j < len(suffix) && isHexByte(suffix[j]) {
@@ -921,41 +870,35 @@ func normalizeForDedupe(content string) string {
 					j++
 				}
 				if allNonDigitHex && j > i+2 {
-					b.WriteString("ADDR")
+					buf = append(buf, "ADDR"...)
 					i = j
 					continue
 				}
 			}
-			// Regular digit run -> N
-			b.WriteByte('N')
+			buf = append(buf, 'N')
 			i++
 			for i < len(suffix) && suffix[i] >= '0' && suffix[i] <= '9' {
 				i++
 			}
 			continue
 		}
-		b.WriteByte(suffix[i])
+		buf = append(buf, suffix[i])
 		i++
 	}
 
-	// Pass 3: replace /[\w/]+/ with /PATH/
-	// The regex is greedy: it matches the longest /[\w/]+/ anchored at the
-	// leading /, but the final character must be /. So we scan [\w/]+ and
-	// then backtrack to the last / in that span.
-	stage12 := b.String()
-	b.Reset()
-	b.Grow(len(stage12))
+	var b strings.Builder
+	b.Grow(len(prefix) + len(buf))
+	b.WriteString(prefix)
 	i = 0
-	for i < len(stage12) {
-		if stage12[i] == '/' && i+1 < len(stage12) && isWordSlashByte(stage12[i+1]) {
+	for i < len(buf) {
+		if buf[i] == '/' && i+1 < len(buf) && isWordSlashByte(buf[i+1]) {
 			j := i + 1
-			for j < len(stage12) && isWordSlashByte(stage12[j]) {
+			for j < len(buf) && isWordSlashByte(buf[j]) {
 				j++
 			}
-			// Find the last '/' in the matched span [i..j).
 			lastSlash := -1
 			for k := j - 1; k > i; k-- {
-				if stage12[k] == '/' {
+				if buf[k] == '/' {
 					lastSlash = k
 					break
 				}
@@ -966,10 +909,10 @@ func normalizeForDedupe(content string) string {
 				continue
 			}
 		}
-		b.WriteByte(stage12[i])
+		b.WriteByte(buf[i])
 		i++
 	}
-	return prefix + b.String()
+	return b.String()
 }
 
 func isHexByte(b byte) bool {
