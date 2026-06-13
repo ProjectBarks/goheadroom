@@ -3,17 +3,45 @@
 Parity report generator: runs Go and Rust CLIs on every fixture,
 compares outputs, times cold (CLI) and warm (library) paths,
 generates self-contained HTML with diffs and dual benchmarks.
+
+Usage:
+    python3 scripts/generate-parity-report.py [--go-bin PATH] [--rust-bin PATH] [--fixtures DIR] [--out PATH]
 """
-import json, os, subprocess, sys, time, difflib
+import argparse, json, os, subprocess, sys, time, difflib
 from pathlib import Path
 from html import escape
 from collections import defaultdict
 
-GO_BIN = "/tmp/goheadroom-bench"
-RUST_BIN = os.path.expanduser("~/headroom-src/target/release/headroom-bench")
-FIXTURES_DIR = os.path.expanduser("~/goheadroom/testdata/parity")
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
 
 NORMALIZE_TRANSFORMS = {"content_detector", "ccr", "cache_aligner"}
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Generate goheadroom parity report")
+    p.add_argument("--go-bin", default=os.environ.get("GO_BENCH_BIN", str(PROJECT_DIR / "goheadroom-bench")),
+                    help="Path to Go bench binary (default: $GO_BENCH_BIN or ./goheadroom-bench)")
+    p.add_argument("--rust-bin", default=os.environ.get("RUST_BENCH_BIN", ""),
+                    help="Path to Rust bench binary (default: $RUST_BENCH_BIN)")
+    p.add_argument("--fixtures", default=str(PROJECT_DIR / "testdata" / "parity"),
+                    help="Path to parity fixtures directory")
+    p.add_argument("--out", default=str(PROJECT_DIR / "parity-report.html"),
+                    help="Output HTML path")
+    p.add_argument("--warm-iters", type=int, default=50,
+                    help="Iterations for warm benchmarks (default: 50)")
+    p.add_argument("--cold-runs", type=int, default=3,
+                    help="Runs for cold timing (default: 3)")
+    return p.parse_args()
+
+def find_binary(name, hint_paths):
+    """Find a binary by checking hint paths, then PATH."""
+    for p in hint_paths:
+        if p and os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    # Try PATH
+    import shutil
+    found = shutil.which(name)
+    return found
 
 def run_timed(binary, fixture_path, runs=3):
     best_ms = float("inf")
@@ -39,7 +67,7 @@ def run_warm(binary, fixture_path, iterations=50):
     try:
         r = subprocess.run(
             [binary, fixture_path, "--bench", str(iterations)],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=60
         )
         if r.returncode == 0:
             for line in r.stderr.strip().splitlines():
@@ -83,8 +111,33 @@ def compute_diff_html(go_out, rust_out):
     return "\n".join(lines)
 
 def main():
-    fixtures = sorted(Path(FIXTURES_DIR).rglob("*.json"))
+    args = parse_args()
+
+    go_bin = find_binary("goheadroom-bench", [
+        args.go_bin,
+        "/tmp/goheadroom-bench",
+        str(PROJECT_DIR / "goheadroom-bench"),
+    ])
+    rust_bin = find_binary("headroom-bench", [
+        args.rust_bin,
+        os.path.expanduser("~/headroom-src/target/release/headroom-bench"),
+    ])
+
+    if not go_bin:
+        print("ERROR: Go bench binary not found. Build with: go build -o goheadroom-bench ./cmd/bench/", file=sys.stderr)
+        sys.exit(1)
+    if not rust_bin:
+        print("WARNING: Rust bench binary not found. Rust columns will be empty.", file=sys.stderr)
+
+    print(f"Go binary:   {go_bin}", file=sys.stderr)
+    print(f"Rust binary: {rust_bin or '(not found)'}", file=sys.stderr)
+
+    fixtures_dir = Path(args.fixtures)
+    fixtures = sorted(fixtures_dir.rglob("*.json"))
     print(f"Processing {len(fixtures)} fixtures...", file=sys.stderr)
+
+    warm_iters = args.warm_iters
+    cold_runs = args.cold_runs
 
     results = []
     for i, fpath in enumerate(fixtures):
@@ -93,13 +146,18 @@ def main():
         transform = fix.get("transform", "unknown")
         category = fpath.parent.name
 
-        go_out, go_rc, go_ms = run_timed(GO_BIN, str(fpath))
-        rust_out, rust_rc, rust_ms = run_timed(RUST_BIN, str(fpath))
+        go_out, go_rc, go_ms = run_timed(go_bin, str(fpath), cold_runs)
+
+        rust_out, rust_rc, rust_ms = "", 1, 0
+        if rust_bin:
+            rust_out, rust_rc, rust_ms = run_timed(rust_bin, str(fpath), cold_runs)
 
         go_norm = normalize_output(transform, go_out)
         rust_norm = normalize_output(transform, rust_out)
 
-        if go_rc != 0 and rust_rc != 0:
+        if not rust_bin:
+            status = "pass" if go_rc == 0 else "go_error"
+        elif go_rc != 0 and rust_rc != 0:
             status = "both_skip"
         elif go_rc != 0:
             status = "go_error"
@@ -117,11 +175,13 @@ def main():
             diff_html = compute_diff_html(go_out[:3000], rust_out[:3000])
 
         # Warm benchmarks via --bench (library-only, no startup)
-        iters = 50
+        # Skip for transforms that aren't actually exercised (cache_aligner)
+        skip_warm = go_out.startswith("SKIP:") or transform == "cache_aligner"
+        iters = warm_iters
         if transform in ("tokenizer",):
-            iters = 10  # tokenizer is slow
-        go_warm_ns = run_warm(GO_BIN, str(fpath), iters) if go_rc == 0 else 0
-        rust_warm_ns = run_warm(RUST_BIN, str(fpath), iters) if rust_rc == 0 else 0
+            iters = max(10, warm_iters // 5)
+        go_warm_ns = run_warm(go_bin, str(fpath), iters) if go_rc == 0 and not skip_warm else 0
+        rust_warm_ns = run_warm(rust_bin, str(fpath), iters) if rust_bin and rust_rc == 0 and not skip_warm else 0
 
         results.append({
             "fixture": fpath.name,
@@ -141,7 +201,7 @@ def main():
         if (i+1) % 20 == 0:
             print(f"  {i+1}/{len(fixtures)}...", file=sys.stderr)
 
-    generate_html(results)
+    generate_html(results, args.out)
 
 def fmt_us(us):
     if us == 0:
@@ -150,7 +210,7 @@ def fmt_us(us):
         return f"{us/1000:.1f}ms"
     return f"{us:.0f}us"
 
-def generate_html(results):
+def generate_html(results, out_path):
     total = len(results)
     passed = sum(1 for r in results if r["status"] == "pass")
     failed = sum(1 for r in results if r["status"] == "fail")
@@ -161,36 +221,38 @@ def generate_html(results):
     for r in results:
         cats[r["category"]].append(r)
 
-    avg_go = sum(r["go_ms"] for r in results if r["go_ms"] > 0) / max(1, sum(1 for r in results if r["go_ms"] > 0))
-    avg_rust = sum(r["rust_ms"] for r in results if r["rust_ms"] > 0) / max(1, sum(1 for r in results if r["rust_ms"] > 0))
-
-    # Per-category summary
-    cat_summaries = {}
-    for cat, entries in cats.items():
+    # Per-category summary with warm + cold
+    summary_rows = []
+    for cat in sorted(cats):
+        entries = cats[cat]
         go_warm = [e["go_warm_us"] for e in entries if e["go_warm_us"] > 0]
         rust_warm = [e["rust_warm_us"] for e in entries if e["rust_warm_us"] > 0]
-        if go_warm:
-            cat_summaries[cat] = {
-                "go_warm_avg": sum(go_warm) / len(go_warm),
-                "rust_warm_avg": sum(rust_warm) / len(rust_warm) if rust_warm else 0,
-                "go_warm_max": max(go_warm),
-                "rust_warm_max": max(rust_warm) if rust_warm else 0,
-            }
+        go_cold = [e["go_ms"] for e in entries if e["go_ms"] > 0]
+        rust_cold = [e["rust_ms"] for e in entries if e["rust_ms"] > 0]
 
-    summary_rows = []
-    for cat in sorted(cat_summaries):
-        s = cat_summaries[cat]
-        ratio = ""
-        if s["rust_warm_avg"] > 0 and s["go_warm_avg"] > 0:
-            r = s["go_warm_avg"] / s["rust_warm_avg"]
-            ratio = f"{r:.2f}x"
+        go_w_avg = sum(go_warm) / len(go_warm) if go_warm else 0
+        rust_w_avg = sum(rust_warm) / len(rust_warm) if rust_warm else 0
+        warm_ratio = f"{go_w_avg / rust_w_avg:.2f}x" if rust_w_avg > 0 and go_w_avg > 0 else "-"
+
+        go_c_avg = sum(go_cold) / len(go_cold) if go_cold else 0
+        rust_c_avg = sum(rust_cold) / len(rust_cold) if rust_cold else 0
+        cold_ratio = f"{go_c_avg / rust_c_avg:.2f}x" if rust_c_avg > 0 and go_c_avg > 0 else "-"
+
+        n_pass = sum(1 for e in entries if e["status"] == "pass")
+        n_total = len(entries)
+        parity_badge = f'<span style="color:#3fb950">{n_pass}/{n_total}</span>' if n_pass == n_total else f'<span style="color:#f85149">{n_pass}/{n_total}</span>'
+
         summary_rows.append(
-            f'<tr><td>{escape(cat)}</td>'
-            f'<td class="mono r" style="color:#00add8">{fmt_us(s["go_warm_avg"])}</td>'
-            f'<td class="mono r" style="color:#f97316">{fmt_us(s["rust_warm_avg"])}</td>'
-            f'<td class="mono r">{ratio}</td>'
-            f'<td class="mono r" style="color:#00add8">{fmt_us(s["go_warm_max"])}</td>'
-            f'<td class="mono r" style="color:#f97316">{fmt_us(s["rust_warm_max"])}</td></tr>'
+            f'<tr>'
+            f'<td><strong>{escape(cat)}</strong></td>'
+            f'<td class="mono r">{parity_badge}</td>'
+            f'<td class="mono r go">{fmt_us(go_w_avg)}</td>'
+            f'<td class="mono r rust">{fmt_us(rust_w_avg)}</td>'
+            f'<td class="mono r">{warm_ratio}</td>'
+            f'<td class="mono r go">{go_c_avg:.1f}ms</td>'
+            f'<td class="mono r rust">{rust_c_avg:.1f}ms</td>'
+            f'<td class="mono r">{cold_ratio}</td>'
+            f'</tr>'
         )
 
     rows = []
@@ -226,11 +288,11 @@ def generate_html(results):
 <td>{escape(e["transform"])}</td>
 <td class="mono r">{e["go_bytes"]}</td>
 <td class="mono r">{e["rust_bytes"]}</td>
-<td class="mono r warm-col">{fmt_us(e["go_warm_us"])}</td>
-<td class="mono r warm-col" style="color:#f0a870">{fmt_us(e["rust_warm_us"])}</td>
+<td class="mono r go">{fmt_us(e["go_warm_us"])}</td>
+<td class="mono r rust">{fmt_us(e["rust_warm_us"])}</td>
 <td class="mono r">{warm_ratio}</td>
-<td class="mono r cold-col">{e["go_ms"]:.1f}</td>
-<td class="mono r cold-col" style="color:#f0a870">{e["rust_ms"]:.1f}</td>
+<td class="mono r go">{e["go_ms"]:.1f}</td>
+<td class="mono r rust">{e["rust_ms"]:.1f}</td>
 <td class="mono r">{cli_ratio}</td>
 </tr>''')
             if has_diff:
@@ -247,7 +309,7 @@ h1{{font-size:2rem;color:#f0f6fc;margin-bottom:.3rem}}
 h2{{font-size:1.2rem;color:#f0f6fc;margin:1.5rem 0 .8rem}}
 .sub{{color:#8b949e;margin-bottom:1.5rem}}
 .hero{{display:flex;align-items:center;gap:2rem;margin:1.5rem 0;flex-wrap:wrap}}
-.ring{{width:150px;height:150px;border-radius:50%;display:flex;align-items:center;justify-content:center}}
+.ring{{width:150px;height:150px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0}}
 .ring-inner{{width:120px;height:120px;border-radius:50%;background:#0d1117;display:flex;align-items:center;justify-content:center;flex-direction:column}}
 .pct{{font-size:2.8rem;font-weight:800;color:#f0f6fc}}
 .pct-lbl{{font-size:.8rem;color:#8b949e}}
@@ -272,13 +334,18 @@ td.r{{text-align:right}}
 .diff-add{{color:#3fb950;display:block}}.diff-del{{color:#f85149;display:block}}.diff-hunk{{color:#8b949e;display:block}}
 .hidden{{display:none}}
 tr.fhide{{display:none}}
-.warm-col{{color:#8db9e8}}
-.cold-col{{color:#d4956a}}
-.summary-table{{width:auto;margin-bottom:1.5rem}}
-.summary-table td,.summary-table th{{padding:.4rem 1.2rem}}
+td.go{{color:#8db9e8}}
+td.rust{{color:#f0a870}}
+th.go{{color:#00add8!important}}
+th.rust{{color:#f97316!important}}
+.summary-table{{width:100%;margin-bottom:1.5rem}}
+.summary-table td,.summary-table th{{padding:.5rem 1rem}}
+.summary-table td.go{{color:#8db9e8}}
+.summary-table td.rust{{color:#f0a870}}
+.th-group{{text-align:center!important;border-bottom:2px solid #30363d;font-size:.65rem;padding:.3rem .8rem}}
 </style></head><body><div class="wrap">
 <h1>goheadroom Parity Report</h1>
-<p class="sub">Go vs Rust output comparison across {total} parity fixtures. Click failed rows to see diff.</p>
+<p class="sub">Go vs Rust: parity, warm (library throughput), and cold (CLI w/ startup) benchmarks across {total} fixtures.</p>
 
 <div class="hero">
 <div class="ring" style="background:conic-gradient(#3fb950 0% {pct}%,#30363d {pct}% 100%)">
@@ -288,19 +355,21 @@ tr.fhide{{display:none}}
 <div class="card"><div class="card-v fail">{failed}</div><div class="card-l">Fail</div></div>
 <div class="card"><div class="card-v skip-c">{skipped}</div><div class="card-l">Skip</div></div>
 <div class="card"><div class="card-v" style="color:#f0f6fc">{total}</div><div class="card-l">Total</div></div>
-<div class="card"><div class="card-v" style="color:#00add8">{avg_go:.1f}ms</div><div class="card-l">Avg Go CLI</div></div>
-<div class="card"><div class="card-v" style="color:#f97316">{avg_rust:.1f}ms</div><div class="card-l">Avg Rust CLI</div></div>
 </div></div>
 
-<h2>Warm Benchmark Summary (library throughput, no startup)</h2>
-<table class="summary-table"><thead><tr>
-<th>Category</th>
-<th class="r" style="color:#00add8">Go Avg</th>
-<th class="r" style="color:#f97316">Rust Avg</th>
-<th class="r">Ratio</th>
-<th class="r" style="color:#00add8">Go Max</th>
-<th class="r" style="color:#f97316">Rust Max</th>
-</tr></thead><tbody>
+<h2>Benchmark Summary</h2>
+<table class="summary-table"><thead>
+<tr>
+<th rowspan="2">Category</th>
+<th rowspan="2" class="r">Parity</th>
+<th colspan="3" class="th-group" style="color:#58a6ff">Warm (library, no startup)</th>
+<th colspan="3" class="th-group" style="color:#f97316">Cold (CLI, with startup)</th>
+</tr>
+<tr>
+<th class="r go">Go</th><th class="r rust">Rust</th><th class="r">Ratio</th>
+<th class="r go">Go</th><th class="r rust">Rust</th><th class="r">Ratio</th>
+</tr>
+</thead><tbody>
 {"".join(summary_rows)}
 </tbody></table>
 
@@ -311,11 +380,12 @@ tr.fhide{{display:none}}
 <button class="fbtn" onclick="filt('skip',this)">Skip ({skipped})</button>
 </div>
 
-<table><thead><tr>
+<table><thead>
+<tr>
 <th></th><th>Fixture</th><th>Transform</th>
 <th class="r">Go B</th><th class="r">Rust B</th>
-<th class="r" style="color:#00add8">Go Warm</th><th class="r" style="color:#f97316">Rust Warm</th><th class="r">Warm Ratio</th>
-<th class="r" style="color:#00add8">Go CLI</th><th class="r" style="color:#f97316">Rust CLI</th><th class="r">CLI Ratio</th>
+<th class="r go">Go Warm</th><th class="r rust">Rust Warm</th><th class="r">Ratio</th>
+<th class="r go">Go CLI</th><th class="r rust">Rust CLI</th><th class="r">Ratio</th>
 </tr></thead><tbody>
 {"".join(rows)}
 </tbody></table>
@@ -331,10 +401,9 @@ else if(f==='skip')r.classList.toggle('fhide',!['both_skip','go_error','rust_err
 function toggleDiff(id){{const r=document.getElementById('diff_'+id);if(r)r.classList.toggle('hidden')}}
 </script></body></html>'''
 
-    out = os.path.expanduser("~/goheadroom/parity-report.html")
-    with open(out, "w") as f:
+    with open(out_path, "w") as f:
         f.write(html)
-    print(f"\nReport: {out}", file=sys.stderr)
+    print(f"\nReport: {out_path}", file=sys.stderr)
     print(f"{passed}/{total} pass ({pct:.0f}%), {failed} fail, {skipped} skip", file=sys.stderr)
 
 if __name__ == "__main__":
