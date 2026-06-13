@@ -13,12 +13,15 @@
 package adaptivesizer
 
 import (
+	"bytes"
 	"compress/flate"
 	"crypto/md5"
 	"encoding/binary"
+	"io"
 	"math"
 	"math/bits"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -264,8 +267,8 @@ func ValidateWithZlib(items []string, k, maxK int, tolerance float64) int {
 		return k
 	}
 
-	fullCompressed := flateCompressedLen([]byte(fullText))
-	subsetCompressed := flateCompressedLen([]byte(subsetText))
+	fullCompressed := flateCompressedLen(fullText)
+	subsetCompressed := flateCompressedLen(subsetText)
 
 	fullRatio := 1.0
 	if len(fullText) > 0 {
@@ -286,15 +289,22 @@ func ValidateWithZlib(items []string, k, maxK int, tolerance float64) int {
 	return k
 }
 
+var flatePool = sync.Pool{
+	New: func() interface{} {
+		w, _ := flate.NewWriter(nil, flate.BestSpeed)
+		return w
+	},
+}
+
 // flateCompressedLen compresses data with DEFLATE at BestSpeed (level 1)
-// and returns the output length.
-func flateCompressedLen(data []byte) int {
-	var buf strings.Builder
-	w, err := flate.NewWriter(&buf, flate.BestSpeed)
-	if err != nil {
-		return len(data)
-	}
-	_, _ = w.Write(data)
+// and returns the output length. Uses a sync.Pool to reuse flate.Writer
+// objects, avoiding ~1.7GB of allocations.
+func flateCompressedLen(s string) int {
+	var buf bytes.Buffer
+	w := flatePool.Get().(*flate.Writer)
+	w.Reset(&buf)
+	_, _ = io.WriteString(w, s)
 	_ = w.Close()
+	flatePool.Put(w)
 	return buf.Len()
 }

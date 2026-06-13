@@ -125,7 +125,7 @@ func (dc *DiffCompressor) CompressWithStore(content, context string, store ccr.C
 		HunksDroppedPerFile: make(map[string]int),
 	}
 
-	lines := splitLines(content)
+	lines := strings.Split(content, "\n")
 	originalLineCount := len(lines)
 	stats.InputLines = originalLineCount
 
@@ -813,21 +813,3 @@ func md5Hex24(s string) string {
 	return string(dst[:24])
 }
 
-// splitLines splits content on newlines, returning substrings of the
-// original string (no copies). This is the same as strings.Split but
-// avoids allocating new string headers for every line -- the returned
-// strings share the backing array of content.
-func splitLines(content string) []string {
-	n := strings.Count(content, "\n") + 1
-	lines := make([]string, 0, n)
-	for {
-		idx := strings.IndexByte(content, '\n')
-		if idx < 0 {
-			lines = append(lines, content)
-			break
-		}
-		lines = append(lines, content[:idx])
-		content = content[idx+1:]
-	}
-	return lines
-}

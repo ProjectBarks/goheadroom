@@ -178,8 +178,8 @@ func (lc *LogCompressor) Compress(content string, bias float64) (LogCompressionR
 // CompressWithStore compresses with optional CCR persistence.
 func (lc *LogCompressor) CompressWithStore(content string, bias float64, store ccr.CcrStore) (LogCompressionResult, LogCompressorStats) {
 	var stats LogCompressorStats
-	lines := strings.Split(content, "\n")
-	originalLineCount := len(lines)
+	li := newLineIndex(content)
+	originalLineCount := li.lineCount()
 
 	if originalLineCount < lc.config.MinLinesForCCR {
 		return LogCompressionResult{
@@ -193,10 +193,10 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 		}, stats
 	}
 
-	format := detectFormat(lines)
+	format := detectFormatIdx(&li)
 	stats.Format = &format
 
-	logLines := lc.parseLines(lines)
+	logLines := lc.parseLinesIdx(&li)
 	selected := lc.selectLines(logLines, bias, &stats)
 	compressedBody, outputStats := lc.formatOutput(selected, logLines)
 	compressed := compressedBody
@@ -253,6 +253,47 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 	return result, stats
 }
 
+// ── Line index (avoids []string allocation from strings.Split) ──────
+
+// lineIndex stores byte offsets into the original content string,
+// avoiding the 16-byte-per-entry []string allocation from strings.Split.
+// Each offset is 4 bytes (int32) vs 16 bytes (string header).
+// Substrings returned by line() share the original backing memory.
+type lineIndex struct {
+	content string
+	offsets []int32 // start offset of each line
+}
+
+func newLineIndex(content string) lineIndex {
+	n := strings.Count(content, "\n") + 1
+	offsets := make([]int32, 0, n+1)
+	offsets = append(offsets, 0)
+	for i := 0; i < len(content); i++ {
+		if content[i] == '\n' {
+			offsets = append(offsets, int32(i+1))
+		}
+	}
+	return lineIndex{content: content, offsets: offsets}
+}
+
+func (li *lineIndex) line(i int) string {
+	start := int(li.offsets[i])
+	var end int
+	if i+1 < len(li.offsets) {
+		end = int(li.offsets[i+1]) - 1 // exclude newline
+	} else {
+		end = len(li.content)
+	}
+	if end < start {
+		end = start
+	}
+	return li.content[start:end]
+}
+
+func (li *lineIndex) lineCount() int {
+	return len(li.offsets)
+}
+
 // ── Format detection ────────────────────────────────────────────────
 
 var formatPatterns = []struct {
@@ -268,6 +309,35 @@ var formatPatterns = []struct {
 	{LogFormatCargo, []string{"Compiling ", "Finished ", "Running ", "warning: ", "error[E"}},
 	{LogFormatJest, []string{"PASS ", "FAIL ", "Test Suites:"}},
 	{LogFormatMake, []string{"make[", "make:", "gcc ", "g++ ", "clang "}},
+}
+
+func detectFormatIdx(li *lineIndex) LogFormat {
+	sampleN := li.lineCount()
+	if sampleN > 100 {
+		sampleN = 100
+	}
+	var bestFormat LogFormat
+	bestScore := 0
+	for _, fp := range formatPatterns {
+		score := 0
+		for i := 0; i < sampleN; i++ {
+			line := li.line(i)
+			for _, pat := range fp.patterns {
+				if strings.Contains(line, pat) {
+					score++
+					break
+				}
+			}
+		}
+		if score > 0 && score > bestScore {
+			bestScore = score
+			bestFormat = fp.format
+		}
+	}
+	if bestScore == 0 {
+		return LogFormatGeneric
+	}
+	return bestFormat
 }
 
 func detectFormat(lines []string) LogFormat {
@@ -565,12 +635,14 @@ func scoreLogLine(line *LogLine) float32 {
 
 // ── Parse lines ─────────────────────────────────────────────────────
 
-func (lc *LogCompressor) parseLines(lines []string) []LogLine {
-	out := make([]LogLine, 0, len(lines))
+func (lc *LogCompressor) parseLinesIdx(li *lineIndex) []LogLine {
+	n := li.lineCount()
+	out := make([]LogLine, 0, n)
 	var activeFlavor *traceFlavor
 	traceLines := 0
 
-	for i, line := range lines {
+	for i := 0; i < n; i++ {
+		line := li.line(i)
 		entry := LogLine{
 			LineNumber: i,
 			Content:    line,
@@ -604,6 +676,12 @@ func (lc *LogCompressor) parseLines(lines []string) []LogLine {
 		out = append(out, entry)
 	}
 	return out
+}
+
+// parseLines is a convenience wrapper used by tests.
+func (lc *LogCompressor) parseLines(lines []string) []LogLine {
+	li := newLineIndex(strings.Join(lines, "\n"))
+	return lc.parseLinesIdx(&li)
 }
 
 // ── Selection ───────────────────────────────────────────────────────

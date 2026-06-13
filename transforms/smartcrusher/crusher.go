@@ -71,7 +71,7 @@ func (sc *SmartCrusher) Crush(content string, query string, bias float64) CrushR
 // Returns (crushedContent, wasModified, info).
 func (sc *SmartCrusher) SmartCrushContent(content string, queryContext string, bias float64) (string, bool, string) {
 	var parsed interface{}
-	if err := json.NewDecoder(strings.NewReader(content)).Decode(&parsed); err != nil {
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
 		return content, false, ""
 	}
 
