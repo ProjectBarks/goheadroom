@@ -58,21 +58,132 @@ func plainTextResult(confidence float64) DetectionResult {
 	return DetectionResult{ContentType: PlainText, Confidence: confidence}
 }
 
-// Regex patterns (compiled once) - kept for complex patterns not worth hand-rolling.
+// Regex patterns (compiled once) - kept only for complex patterns not worth hand-rolling.
 var (
-	searchResultPattern = regexp.MustCompile(`^[^\s:]+:\d+:`)
-
 	diffHeaderPattern = regexp.MustCompile(`^(diff --git|diff --combined |diff --cc |--- a/|@@\s+-\d+,\d+\s+\+\d+,\d+\s+@@|@@@+\s+-\d+(?:,\d+)?\s+(?:-\d+(?:,\d+)?\s+)+\+\d+(?:,\d+)?\s+@@@+)`)
-
-	diffChangePattern = regexp.MustCompile(`^[+-][^+-]`)
-
-	// HTML patterns.
-	htmlDoctypePattern    = regexp.MustCompile(`(?i)^\s*<!doctype\s+html`)
-	htmlTagPattern        = regexp.MustCompile(`(?i)<html[\s>]`)
-	htmlHeadPattern       = regexp.MustCompile(`(?i)<head[\s>]`)
-	htmlBodyPattern       = regexp.MustCompile(`(?i)<body[\s>]`)
-	htmlStructuralPattern = regexp.MustCompile(`(?i)<(div|span|script|style|link|meta|nav|header|footer|aside|article|section|main)[\s>]`)
 )
+
+// matchesSearchResult replaces searchResultPattern `^[^\s:]+:\d+:`
+// Scans for non-space non-colon chars, then ':', then digits, then ':'.
+func matchesSearchResult(line string) bool {
+	i := 0
+	for i < len(line) && line[i] != ':' && line[i] != ' ' && line[i] != '\t' && line[i] != '\n' && line[i] != '\r' {
+		i++
+	}
+	if i == 0 || i >= len(line) || line[i] != ':' {
+		return false
+	}
+	i++ // skip ':'
+	if i >= len(line) || line[i] < '0' || line[i] > '9' {
+		return false
+	}
+	for i < len(line) && line[i] >= '0' && line[i] <= '9' {
+		i++
+	}
+	return i < len(line) && line[i] == ':'
+}
+
+// matchesDiffChange replaces diffChangePattern `^[+-][^+-]`
+func matchesDiffChange(line string) bool {
+	return len(line) >= 2 && (line[0] == '+' || line[0] == '-') && line[1] != '+' && line[1] != '-'
+}
+
+// ---------------------------------------------------------------------------
+// HTML detection helpers (replace regex for small-sample HTML detection)
+// ---------------------------------------------------------------------------
+
+// toLowerASCII returns the ASCII-lowercase of c.
+func toLowerASCII(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + 32
+	}
+	return c
+}
+
+// matchesHTMLDoctype replaces htmlDoctypePattern `(?i)^\s*<!doctype\s+html`
+func matchesHTMLDoctype(s string) bool {
+	i := skipLineWhitespace(s)
+	const prefix = "<!doctype"
+	if i+len(prefix) > len(s) {
+		return false
+	}
+	for j := 0; j < len(prefix); j++ {
+		if toLowerASCII(s[i+j]) != prefix[j] {
+			return false
+		}
+	}
+	k := i + len(prefix)
+	if k >= len(s) || (s[k] != ' ' && s[k] != '\t') {
+		return false
+	}
+	// skip whitespace then check "html"
+	for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
+		k++
+	}
+	return k+4 <= len(s) &&
+		toLowerASCII(s[k]) == 'h' &&
+		toLowerASCII(s[k+1]) == 't' &&
+		toLowerASCII(s[k+2]) == 'm' &&
+		toLowerASCII(s[k+3]) == 'l'
+}
+
+// containsHTMLTagCI searches for `<tag` followed by whitespace or '>' (case-insensitive).
+func containsHTMLTagCI(s string, tag string) bool {
+	// tag is pre-lowered
+	limit := len(s) - len(tag) - 1 // need at least '<' + tag
+	for i := 0; i <= limit; i++ {
+		if s[i] != '<' {
+			continue
+		}
+		match := true
+		for j := 0; j < len(tag); j++ {
+			if toLowerASCII(s[i+1+j]) != tag[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			next := i + 1 + len(tag)
+			if next < len(s) && (s[next] == ' ' || s[next] == '\t' || s[next] == '>' || s[next] == '\n' || s[next] == '/') {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// countHTMLStructuralTags replaces htmlStructuralPattern FindAllStringIndex.
+// Counts occurrences of structural HTML tags (case-insensitive).
+func countHTMLStructuralTags(s string) uint32 {
+	tags := []string{"div", "span", "script", "style", "link", "meta", "nav", "header", "footer", "aside", "article", "section", "main"}
+	var count uint32
+	for i := 0; i < len(s)-1; i++ {
+		if s[i] != '<' {
+			continue
+		}
+		for _, tag := range tags {
+			end := i + 1 + len(tag)
+			if end >= len(s) {
+				continue
+			}
+			match := true
+			for j := 0; j < len(tag); j++ {
+				if toLowerASCII(s[i+1+j]) != tag[j] {
+					match = false
+					break
+				}
+			}
+			if match {
+				c := s[end]
+				if c == ' ' || c == '\t' || c == '>' || c == '\n' || c == '/' {
+					count++
+					break // only count one tag per '<' position
+				}
+			}
+		}
+	}
+	return count
+}
 
 // ---------------------------------------------------------------------------
 // String-scanning helpers (replace regex for hot-path code detection)
@@ -140,13 +251,62 @@ func hasLiteralPrefix(s string, start int, prefix string) bool {
 // containsWordCI checks if line contains any of the keywords as whole words
 // (case-insensitive). Matches (?i)\b(KW1|KW2)\b
 // Zero-allocation: uses inline ASCII case-folding instead of strings.ToLower.
+// Uses a first-char dispatch to skip positions that can't match any keyword.
 func containsWordCI(line string, keywords []string) bool {
+	if len(keywords) == 0 || len(line) == 0 {
+		return false
+	}
+	var firstChars [26]bool
 	for _, kw := range keywords {
-		if indexWordFoldASCII(line, kw) >= 0 {
-			return true
+		if len(kw) > 0 && kw[0] >= 'a' && kw[0] <= 'z' {
+			firstChars[kw[0]-'a'] = true
+		}
+	}
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		if c < 'a' || c > 'z' {
+			continue
+		}
+		if !firstChars[c-'a'] {
+			continue
+		}
+		if i > 0 && isWordChar(line[i-1]) {
+			continue
+		}
+		for _, kw := range keywords {
+			if kw[0] != c {
+				continue
+			}
+			if matchWordAtCD(line, i, kw) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func matchWordAtCD(s string, i int, kw string) bool {
+	kwLen := len(kw)
+	if i+kwLen > len(s) {
+		return false
+	}
+	for j := 1; j < kwLen; j++ {
+		c := s[i+j]
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		if c != kw[j] {
+			return false
+		}
+	}
+	end := i + kwLen
+	if end < len(s) && isWordChar(s[end]) {
+		return false
+	}
+	return true
 }
 
 // indexWordFoldASCII finds kw in s case-insensitively with word-boundary checks.
@@ -822,7 +982,7 @@ func tryDetectDiff(text string) (DetectionResult, bool) {
 		if diffHeaderPattern.MatchString(line) {
 			headerMatches++
 		}
-		if diffChangePattern.MatchString(line) {
+		if matchesDiffChange(line) {
 			changeMatches++
 		}
 	})
@@ -848,11 +1008,11 @@ func tryDetectHTML(text string) (DetectionResult, bool) {
 		sample = sample[:3000]
 	}
 
-	hasDoctype := htmlDoctypePattern.MatchString(sample)
-	hasHTMLTag := htmlTagPattern.MatchString(sample)
-	hasHead := htmlHeadPattern.MatchString(sample)
-	hasBody := htmlBodyPattern.MatchString(sample)
-	structuralMatches := uint32(len(htmlStructuralPattern.FindAllStringIndex(sample, -1)))
+	hasDoctype := matchesHTMLDoctype(sample)
+	hasHTMLTag := containsHTMLTagCI(sample, "html")
+	hasHead := containsHTMLTagCI(sample, "head")
+	hasBody := containsHTMLTagCI(sample, "body")
+	structuralMatches := countHTMLStructuralTags(sample)
 
 	if !hasDoctype && !hasHTMLTag && structuralMatches < 3 {
 		return DetectionResult{}, false
@@ -898,7 +1058,7 @@ func tryDetectSearch(text string) (DetectionResult, bool) {
 			return
 		}
 		nonEmptyLines++
-		if searchResultPattern.MatchString(line) {
+		if matchesSearchResult(line) {
 			matchingLines++
 		}
 	})
@@ -992,7 +1152,6 @@ func tryDetectCode(text string) (DetectionResult, bool) {
 				if !found {
 					languageScores = append(languageScores, langScore{cl.name, 1})
 				}
-				break
 			}
 		}
 	})

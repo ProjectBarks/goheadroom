@@ -368,6 +368,11 @@ var (
 )
 
 func isDiffHeader(line string) bool {
+	// All diff headers start with "diff --". Quick prefix check avoids
+	// regex engine overhead for the vast majority of lines.
+	if len(line) < 11 || line[0] != 'd' || line[4] != ' ' || line[5] != '-' || line[6] != '-' {
+		return false
+	}
 	return diffGitRe.MatchString(line) || diffCombinedRe.MatchString(line) || diffCCRe.MatchString(line)
 }
 
@@ -387,7 +392,47 @@ func parseDiff(lines []string) *parsedDiff {
 	var warnings []string
 
 	for _, line := range lines {
-		if isDiffHeader(line) {
+		lineLen := len(line)
+
+		// Fast path: when inside a hunk, the vast majority of lines are
+		// content lines starting with '+', '-', ' ', '\', or empty.
+		// Check those first to avoid any regex matching on the hot path.
+		if currentHunk != nil && lineLen > 0 {
+			c := line[0]
+			switch c {
+			case '+':
+				if lineLen < 4 || line[1] != '+' || line[2] != '+' {
+					// Addition line (not "+++").
+					currentHunk.additions++
+					currentHunk.lines = append(currentHunk.lines, line)
+					continue
+				}
+			case '-':
+				if lineLen < 4 || line[1] != '-' || line[2] != '-' {
+					// Deletion line (not "---").
+					currentHunk.deletions++
+					currentHunk.lines = append(currentHunk.lines, line)
+					continue
+				}
+			case ' ':
+				currentHunk.contextLines++
+				currentHunk.lines = append(currentHunk.lines, line)
+				continue
+			case '\\':
+				// "\ No newline at end of file" etc.
+				currentHunk.lines = append(currentHunk.lines, line)
+				continue
+			}
+			// Fall through for lines starting with 'd', '@', '+'(+++), '-'(---), etc.
+		} else if currentHunk != nil {
+			// Empty line inside a hunk = context.
+			currentHunk.contextLines++
+			currentHunk.lines = append(currentHunk.lines, line)
+			continue
+		}
+
+		// Diff header: "diff --git ...", "diff --combined ...", "diff --cc ..."
+		if lineLen > 10 && line[0] == 'd' && line[1] == 'i' && isDiffHeader(line) {
 			if currentHunk != nil {
 				if currentFile != nil {
 					currentFile.hunks = append(currentFile.hunks, currentHunk)
@@ -408,43 +453,10 @@ func parseDiff(lines []string) *parsedDiff {
 			continue
 		}
 
-		// File-level markers.
-		if strings.HasPrefix(line, "new file mode") {
-			currentFile.isNewFile = true
-			s := line
-			currentFile.originalNewFileModeLine = &s
-		} else if strings.HasPrefix(line, "deleted file mode") {
-			currentFile.isDeletedFile = true
-			s := line
-			currentFile.originalDeletedFileModeLine = &s
-		} else if strings.HasPrefix(line, "rename ") || strings.HasPrefix(line, "similarity ") ||
-			strings.HasPrefix(line, "copy ") || strings.HasPrefix(line, "dissimilarity ") {
-			currentFile.isRenamed = true
-			currentFile.renameLines = append(currentFile.renameLines, line)
-		} else if binaryRe.MatchString(line) {
-			currentFile.isBinary = true
-			s := line
-			currentFile.originalBinaryLine = &s
-		}
-
-		// --- a/file
-		if oldFileRe.MatchString(line) {
-			currentFile.oldFile = line
-			continue
-		}
-
-		// +++ b/file
-		if newFileRe.MatchString(line) {
-			currentFile.newFile = line
-			continue
-		}
-
-		// Hunk header.
-		if hunkHeaderRe.MatchString(line) {
+		// Hunk header: lines starting with '@'.
+		if lineLen > 0 && line[0] == '@' && hunkHeaderRe.MatchString(line) {
 			if currentHunk != nil {
-				if currentFile != nil {
-					currentFile.hunks = append(currentFile.hunks, currentHunk)
-				}
+				currentFile.hunks = append(currentFile.hunks, currentHunk)
 			}
 			currentHunk = &diffHunk{
 				header: line,
@@ -452,21 +464,63 @@ func parseDiff(lines []string) *parsedDiff {
 			continue
 		}
 
-		// Hunk content.
-		if currentHunk != nil {
-			if len(line) > 0 && line[0] == '+' && !strings.HasPrefix(line, "+++") {
-				currentHunk.additions++
-				currentHunk.lines = append(currentHunk.lines, line)
-			} else if len(line) > 0 && line[0] == '-' && !strings.HasPrefix(line, "---") {
-				currentHunk.deletions++
-				currentHunk.lines = append(currentHunk.lines, line)
-			} else if (len(line) > 0 && line[0] == ' ') || line == "" {
-				currentHunk.contextLines++
-				currentHunk.lines = append(currentHunk.lines, line)
-			} else {
-				// "Other" line: `\ No newline at end of file`, etc.
-				currentHunk.lines = append(currentHunk.lines, line)
+		// --- a/file
+		if lineLen > 3 && line[0] == '-' && line[1] == '-' && line[2] == '-' && oldFileRe.MatchString(line) {
+			currentFile.oldFile = line
+			continue
+		}
+
+		// +++ b/file
+		if lineLen > 3 && line[0] == '+' && line[1] == '+' && line[2] == '+' && newFileRe.MatchString(line) {
+			currentFile.newFile = line
+			continue
+		}
+
+		// File-level markers (these are uncommon, only in file header sections).
+		if lineLen > 0 {
+			switch line[0] {
+			case 'n':
+				if strings.HasPrefix(line, "new file mode") {
+					currentFile.isNewFile = true
+					s := line
+					currentFile.originalNewFileModeLine = &s
+				}
+			case 'd':
+				if strings.HasPrefix(line, "deleted file mode") {
+					currentFile.isDeletedFile = true
+					s := line
+					currentFile.originalDeletedFileModeLine = &s
+				} else if strings.HasPrefix(line, "dissimilarity ") {
+					currentFile.isRenamed = true
+					currentFile.renameLines = append(currentFile.renameLines, line)
+				}
+			case 'r':
+				if strings.HasPrefix(line, "rename ") {
+					currentFile.isRenamed = true
+					currentFile.renameLines = append(currentFile.renameLines, line)
+				}
+			case 's':
+				if strings.HasPrefix(line, "similarity ") {
+					currentFile.isRenamed = true
+					currentFile.renameLines = append(currentFile.renameLines, line)
+				}
+			case 'c':
+				if strings.HasPrefix(line, "copy ") {
+					currentFile.isRenamed = true
+					currentFile.renameLines = append(currentFile.renameLines, line)
+				}
+			case 'B':
+				if binaryRe.MatchString(line) {
+					currentFile.isBinary = true
+					s := line
+					currentFile.originalBinaryLine = &s
+				}
 			}
+		}
+
+		// If inside a hunk, this is an "other" line.
+		if currentHunk != nil {
+			currentHunk.lines = append(currentHunk.lines, line)
 		}
 	}
 
@@ -543,12 +597,66 @@ func hunkMatchesPriority(lines []string) bool {
 // containsAnyWordCI returns true if s contains any of the keywords as a
 // whole word, case-insensitive. All keywords must be lowercase.
 func containsAnyWordCI(s string, keywords []string) bool {
+	if len(keywords) == 0 || len(s) == 0 {
+		return false
+	}
+	var firstChars [26]bool
 	for _, kw := range keywords {
-		if indexWordFoldASCII(s, kw) >= 0 {
-			return true
+		if len(kw) > 0 && kw[0] >= 'a' && kw[0] <= 'z' {
+			firstChars[kw[0]-'a'] = true
+		}
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		if c < 'a' || c > 'z' {
+			continue
+		}
+		if !firstChars[c-'a'] {
+			continue
+		}
+		if i > 0 {
+			b := s[i-1]
+			if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' {
+				continue
+			}
+		}
+		for _, kw := range keywords {
+			if kw[0] != c {
+				continue
+			}
+			if matchWordAtDC(s, i, kw) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+func matchWordAtDC(s string, i int, kw string) bool {
+	kwLen := len(kw)
+	if i+kwLen > len(s) {
+		return false
+	}
+	for j := 1; j < kwLen; j++ {
+		c := s[i+j]
+		if c >= 'A' && c <= 'Z' {
+			c += 32
+		}
+		if c != kw[j] {
+			return false
+		}
+	}
+	end := i + kwLen
+	if end < len(s) {
+		b := s[end]
+		if (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // indexWordFoldASCII finds the first occurrence of kw in s as a whole word,

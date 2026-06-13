@@ -8,7 +8,6 @@ package logcompressor
 import (
 	"crypto/md5"
 	"encoding/hex"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -687,35 +686,36 @@ func (lc *LogCompressor) parseLines(lines []string) []LogLine {
 // ── Selection ───────────────────────────────────────────────────────
 
 func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *LogCompressorStats) []LogLine {
-	allStrings := make([]string, len(logLines))
-	for i, l := range logLines {
-		allStrings[i] = l.Content
+	n := len(logLines)
+	allStrings := make([]string, n)
+	for i := range logLines {
+		allStrings[i] = logLines[i].Content
 	}
 	maxK := lc.config.MaxTotalLines
 	adaptiveMax := adaptivesizer.ComputeOptimalK(allStrings, bias, 10, &maxK)
 
-	// Categorize.
-	var errors, fails, warnings, summaries []LogLine
-	var stackTraces [][]LogLine
-	var currentStack []LogLine
+	// Categorize using index slices instead of copying LogLine structs.
+	var errorIdx, failIdx, warnIdx, summaryIdx []int
+	var stackTraces [][]int // each element is a slice of line indices
+	var currentStack []int
 
-	for _, line := range logLines {
-		switch line.Level {
+	for i := range logLines {
+		switch logLines[i].Level {
 		case LogLevelError:
-			errors = append(errors, line)
+			errorIdx = append(errorIdx, i)
 		case LogLevelFail:
-			fails = append(fails, line)
+			failIdx = append(failIdx, i)
 		case LogLevelWarn:
-			warnings = append(warnings, line)
+			warnIdx = append(warnIdx, i)
 		}
-		if line.IsStackTrace {
-			currentStack = append(currentStack, line)
+		if logLines[i].IsStackTrace {
+			currentStack = append(currentStack, i)
 		} else if len(currentStack) > 0 {
 			stackTraces = append(stackTraces, currentStack)
 			currentStack = nil
 		}
-		if line.IsSummary {
-			summaries = append(summaries, line)
+		if logLines[i].IsSummary {
+			summaryIdx = append(summaryIdx, i)
 		}
 	}
 	if len(currentStack) > 0 {
@@ -723,26 +723,33 @@ func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *Lo
 	}
 	stats.StackTracesSeen = len(stackTraces)
 
-	// BTreeSet equivalent: use map for uniqueness, sort at end.
-	selected := make(map[int]LogLine)
-
-	for _, line := range lc.selectWithFirstLast(errors, lc.config.MaxErrors) {
-		selected[line.LineNumber] = line
+	// Use a bool slice instead of map[int]LogLine for O(1) set membership.
+	sel := make([]bool, n)
+	selCount := 0
+	markSelected := func(idx int) {
+		if !sel[idx] {
+			sel[idx] = true
+			selCount++
+		}
 	}
-	for _, line := range lc.selectWithFirstLast(fails, lc.config.MaxErrors) {
-		selected[line.LineNumber] = line
+
+	for _, idx := range lc.selectWithFirstLastIdx(logLines, errorIdx, lc.config.MaxErrors) {
+		markSelected(idx)
+	}
+	for _, idx := range lc.selectWithFirstLastIdx(logLines, failIdx, lc.config.MaxErrors) {
+		markSelected(idx)
 	}
 
 	if lc.config.DedupeWarnings {
-		original := len(warnings)
-		warnings = dedupeSimilar(warnings)
-		stats.WarningsDroppedByDedupe = original - len(warnings)
+		original := len(warnIdx)
+		warnIdx = dedupeSimilarIdx(logLines, warnIdx)
+		stats.WarningsDroppedByDedupe = original - len(warnIdx)
 	}
-	for i, line := range warnings {
+	for i, idx := range warnIdx {
 		if i >= lc.config.MaxWarnings {
 			break
 		}
-		selected[line.LineNumber] = line
+		markSelected(idx)
 	}
 
 	for i, stack := range stackTraces {
@@ -750,55 +757,54 @@ func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *Lo
 			break
 		}
 		stats.StackTracesKept++
-		for j, line := range stack {
+		for j, idx := range stack {
 			if j >= lc.config.StackTraceMaxLines {
 				break
 			}
-			selected[line.LineNumber] = line
+			markSelected(idx)
 		}
 	}
 
 	if lc.config.KeepSummaryLines {
-		for _, line := range summaries {
-			selected[line.LineNumber] = line
+		for _, idx := range summaryIdx {
+			markSelected(idx)
 		}
 	}
 
-	// Add context lines around every selected entry.
-	selectedIndices := make(map[int]bool)
-	for idx := range selected {
-		selectedIndices[idx] = true
-	}
-	contextIndices := make(map[int]bool)
-	for idx := range selectedIndices {
-		lo := idx - lc.config.ErrorContextLines
-		if lo < 0 {
-			lo = 0
-		}
-		hi := idx + lc.config.ErrorContextLines + 1
-		if hi > len(logLines) {
-			hi = len(logLines)
-		}
-		for i := lo; i < hi; i++ {
-			if i != idx {
-				contextIndices[i] = true
+	// Add context lines around every selected entry using the bool slice.
+	// Snapshot which indices are selected before adding context.
+	contextSel := make([]bool, n)
+	for i := 0; i < n; i++ {
+		if sel[i] {
+			lo := i - lc.config.ErrorContextLines
+			if lo < 0 {
+				lo = 0
+			}
+			hi := i + lc.config.ErrorContextLines + 1
+			if hi > n {
+				hi = n
+			}
+			for j := lo; j < hi; j++ {
+				if j != i {
+					contextSel[j] = true
+				}
 			}
 		}
 	}
-	for idx := range contextIndices {
-		if !selectedIndices[idx] && idx < len(logLines) {
-			selected[idx] = logLines[idx]
+	for i := 0; i < n; i++ {
+		if contextSel[i] && !sel[i] {
+			sel[i] = true
+			selCount++
 		}
 	}
 
-	// Collect and sort by line number.
-	ordered := make([]LogLine, 0, len(selected))
-	for _, line := range selected {
-		ordered = append(ordered, line)
+	// Collect in line-number order (sel is already indexed by line number).
+	ordered := make([]LogLine, 0, selCount)
+	for i := 0; i < n; i++ {
+		if sel[i] {
+			ordered = append(ordered, logLines[i])
+		}
 	}
-	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].LineNumber < ordered[j].LineNumber
-	})
 
 	// Apply adaptive cap.
 	if len(ordered) > adaptiveMax {
@@ -818,37 +824,40 @@ func (lc *LogCompressor) selectLines(logLines []LogLine, bias float64, stats *Lo
 	return ordered
 }
 
-func (lc *LogCompressor) selectWithFirstLast(lines []LogLine, maxCount int) []LogLine {
-	if len(lines) <= maxCount {
-		return lines
+// selectWithFirstLastIdx selects up to maxCount indices from idx,
+// keeping first/last and highest-scoring. Returns selected indices.
+func (lc *LogCompressor) selectWithFirstLastIdx(logLines []LogLine, idx []int, maxCount int) []int {
+	if len(idx) <= maxCount {
+		return idx
 	}
-	out := make([]LogLine, 0, maxCount)
-	seen := make(map[int]bool)
-	push := func(line LogLine) {
-		if !seen[line.LineNumber] {
-			seen[line.LineNumber] = true
-			out = append(out, line)
+	out := make([]int, 0, maxCount)
+	seen := make([]bool, len(logLines))
+	push := func(i int) {
+		if !seen[i] {
+			seen[i] = true
+			out = append(out, i)
 		}
 	}
 	if lc.config.KeepFirstError {
-		push(lines[0])
+		push(idx[0])
 	}
 	if lc.config.KeepLastError {
-		push(lines[len(lines)-1])
+		push(idx[len(idx)-1])
 	}
 	remaining := maxCount - len(out)
 	if remaining > 0 {
-		byScore := make([]LogLine, len(lines))
-		copy(byScore, lines)
+		byScore := make([]int, len(idx))
+		copy(byScore, idx)
 		sort.SliceStable(byScore, func(i, j int) bool {
-			if byScore[i].Score != byScore[j].Score {
-				return byScore[i].Score > byScore[j].Score
+			si, sj := logLines[byScore[i]].Score, logLines[byScore[j]].Score
+			if si != sj {
+				return si > sj
 			}
-			return byScore[i].LineNumber < byScore[j].LineNumber
+			return byScore[i] < byScore[j]
 		})
-		for _, line := range byScore {
-			if !seen[line.LineNumber] {
-				push(line)
+		for _, i := range byScore {
+			if !seen[i] {
+				push(i)
 				if len(out) >= maxCount {
 					break
 				}
@@ -860,12 +869,6 @@ func (lc *LogCompressor) selectWithFirstLast(lines []LogLine, maxCount int) []Lo
 
 // ── Deduplication ───────────────────────────────────────────────────
 
-var (
-	digitRe = regexp.MustCompile(`\d+`)
-	hexRe   = regexp.MustCompile(`0x[0-9a-fA-F]+`)
-	pathRe  = regexp.MustCompile(`/[\w/]+/`)
-)
-
 func normalizeForDedupe(content string) string {
 	splitAt := strings.IndexAny(content, ":=")
 	if splitAt < 0 {
@@ -873,21 +876,134 @@ func normalizeForDedupe(content string) string {
 	}
 	prefix := content[:splitAt]
 	suffix := content[splitAt:]
-	stage1 := digitRe.ReplaceAllString(suffix, "N")
-	stage2 := hexRe.ReplaceAllString(stage1, "ADDR")
-	stage3 := pathRe.ReplaceAllString(stage2, "/PATH/")
-	return prefix + stage3
+
+	// Replicate the original three-pass order: digits -> hex -> paths.
+	// Pass 1+2 combined: replace \d+ with N (but 0x[hex]+ with ADDR).
+	var b strings.Builder
+	b.Grow(len(suffix))
+	i := 0
+	for i < len(suffix) {
+		// Check for hex address: 0x[0-9a-fA-F]+ before digit replacement
+		// can mangle the hex digits. In the original code, digit replacement
+		// runs first but hex letters (a-f) aren't \d, so pure-letter hex
+		// like 0xdeadbeef survives. Mixed like 0x1a2b becomes 0xNaN which
+		// then doesn't match hex pattern. We replicate that: only replace
+		// 0x followed by non-digit hex chars as ADDR.
+		if suffix[i] >= '0' && suffix[i] <= '9' {
+			// Check if this is the start of 0x...
+			if suffix[i] == '0' && i+2 < len(suffix) && suffix[i+1] == 'x' && isHexByte(suffix[i+2]) {
+				// Replicate old behavior: digits in the hex part would have
+				// been replaced by N in stage1, then stage2 checks 0x[hex]+.
+				// After stage1, 0xdeadbeef -> 0xdeadbeef (no digits),
+				// 0x1234 -> 0xN (digits replaced), which doesn't match hex pattern.
+				// So: check if ALL chars after 0x are non-digit hex. If so, ADDR.
+				// Otherwise, treat 0 as a digit and let normal digit replacement handle it.
+				j := i + 2
+				allNonDigitHex := true
+				for j < len(suffix) && isHexByte(suffix[j]) {
+					if suffix[j] >= '0' && suffix[j] <= '9' {
+						allNonDigitHex = false
+					}
+					j++
+				}
+				if allNonDigitHex && j > i+2 {
+					b.WriteString("ADDR")
+					i = j
+					continue
+				}
+			}
+			// Regular digit run -> N
+			b.WriteByte('N')
+			i++
+			for i < len(suffix) && suffix[i] >= '0' && suffix[i] <= '9' {
+				i++
+			}
+			continue
+		}
+		b.WriteByte(suffix[i])
+		i++
+	}
+
+	// Pass 3: replace /[\w/]+/ with /PATH/
+	// The regex is greedy: it matches the longest /[\w/]+/ anchored at the
+	// leading /, but the final character must be /. So we scan [\w/]+ and
+	// then backtrack to the last / in that span.
+	stage12 := b.String()
+	b.Reset()
+	b.Grow(len(stage12))
+	i = 0
+	for i < len(stage12) {
+		if stage12[i] == '/' && i+1 < len(stage12) && isWordSlashByte(stage12[i+1]) {
+			j := i + 1
+			for j < len(stage12) && isWordSlashByte(stage12[j]) {
+				j++
+			}
+			// Find the last '/' in the matched span [i..j).
+			lastSlash := -1
+			for k := j - 1; k > i; k-- {
+				if stage12[k] == '/' {
+					lastSlash = k
+					break
+				}
+			}
+			if lastSlash > i {
+				b.WriteString("/PATH/")
+				i = lastSlash + 1
+				continue
+			}
+		}
+		b.WriteByte(stage12[i])
+		i++
+	}
+	return prefix + b.String()
 }
 
-func dedupeSimilar(lines []LogLine) []LogLine {
-	seen := make(map[string]bool)
-	out := make([]LogLine, 0, len(lines))
-	for _, line := range lines {
-		key := normalizeForDedupe(line.Content)
+func isHexByte(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+func isWordSlashByte(b byte) bool {
+	return isWordByte(b) || b == '/'
+}
+
+// dedupeSimilarIdx deduplicates warning indices by normalized content.
+func dedupeSimilarIdx(logLines []LogLine, idx []int) []int {
+	seen := make(map[string]bool, len(idx))
+	out := make([]int, 0, len(idx))
+	for _, i := range idx {
+		key := normalizeForDedupe(logLines[i].Content)
 		if !seen[key] {
 			seen[key] = true
-			out = append(out, line)
+			out = append(out, i)
 		}
+	}
+	return out
+}
+
+// dedupeSimilar is a convenience wrapper used by tests.
+func dedupeSimilar(lines []LogLine) []LogLine {
+	idx := make([]int, len(lines))
+	for i := range lines {
+		idx[i] = i
+	}
+	kept := dedupeSimilarIdx(lines, idx)
+	out := make([]LogLine, len(kept))
+	for i, j := range kept {
+		out[i] = lines[j]
+	}
+	return out
+}
+
+// selectWithFirstLast is a convenience wrapper used by tests.
+func (lc *LogCompressor) selectWithFirstLast(lines []LogLine, maxCount int) []LogLine {
+	idx := make([]int, len(lines))
+	for i := range lines {
+		idx[i] = i
+	}
+	kept := lc.selectWithFirstLastIdx(lines, idx, maxCount)
+	out := make([]LogLine, len(kept))
+	for i, j := range kept {
+		out[i] = lines[j]
 	}
 	return out
 }

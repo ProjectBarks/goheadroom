@@ -107,7 +107,7 @@ func makeRunner(fix Fixture) func() string {
 		json.Unmarshal(fix.Input, &input)
 		return func() string {
 			det := contentdetector.DetectContentType(input)
-			return fmt.Sprintf("%s:%.2f", ctName(det.ContentType), det.Confidence)
+			return fmt.Sprintf("%s:%.2f", det.ContentType.String(), det.Confidence)
 		}
 
 	case "ccr":
@@ -136,18 +136,3 @@ func makeRunner(fix Fixture) func() string {
 	}
 }
 
-func ctName(ct contentdetector.ContentType) string {
-	names := map[contentdetector.ContentType]string{
-		contentdetector.PlainText:     "text",
-		contentdetector.JsonArray:     "json",
-		contentdetector.SourceCode:    "code",
-		contentdetector.SearchResults: "search",
-		contentdetector.BuildOutput:   "build",
-		contentdetector.GitDiff:       "diff",
-		contentdetector.Html:          "html",
-	}
-	if n, ok := names[ct]; ok {
-		return n
-	}
-	return "unknown"
-}

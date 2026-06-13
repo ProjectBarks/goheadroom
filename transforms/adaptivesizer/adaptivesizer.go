@@ -233,39 +233,59 @@ func Simhash(text string) uint64 {
 }
 
 // simhashASCII handles the common case where text is pure ASCII.
-// Zero allocations: operates on the original string bytes with inline lowering.
+// Pre-lowercases once, then hashes 4-byte grams with unrolled FNV-1a.
 func simhashASCII(text string) uint64 {
 	n := len(text)
-	iterCount := 1
-	if n > 3 {
-		iterCount = n - 3
+
+	// Pre-lowercase the entire string once. Use stack buffer for short strings.
+	var stackBuf [256]byte
+	var lower []byte
+	if n <= 256 {
+		lower = stackBuf[:n]
+	} else {
+		lower = make([]byte, n)
+	}
+	for i := 0; i < n; i++ {
+		c := text[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		lower[i] = c
 	}
 
+	const fnvOffset = uint64(14695981039346656037)
+	const fnvPrime = uint64(1099511628211)
+
 	var votes [64]int32
-	var buf [4]byte
 
-	for i := 0; i < iterCount; i++ {
-		end := i + 4
-		if end > n {
-			end = n
-		}
-		for k, j := 0, i; j < end; j++ {
-			c := text[j]
-			if c >= 'A' && c <= 'Z' {
-				c += 'a' - 'A'
+	if n >= 4 {
+		// Common path: unrolled 4-byte gram FNV-1a, no buf array needed.
+		for i := 0; i <= n-4; i++ {
+			h := fnvOffset
+			h ^= uint64(lower[i])
+			h *= fnvPrime
+			h ^= uint64(lower[i+1])
+			h *= fnvPrime
+			h ^= uint64(lower[i+2])
+			h *= fnvPrime
+			h ^= uint64(lower[i+3])
+			h *= fnvPrime
+
+			for j := range 64 {
+				if (h>>j)&1 == 1 {
+					votes[j]++
+				} else {
+					votes[j]--
+				}
 			}
-			buf[k] = c
-			k++
 		}
-		gramLen := end - i
-
-		// Inline FNV-1a 64-bit hash for the gram (replaces md5).
-		h := uint64(14695981039346656037)
-		for j := 0; j < gramLen; j++ {
-			h ^= uint64(buf[j])
-			h *= 1099511628211
+	} else {
+		// Short string (< 4 chars): single iteration on entire string.
+		h := fnvOffset
+		for i := 0; i < n; i++ {
+			h ^= uint64(lower[i])
+			h *= fnvPrime
 		}
-
 		for j := range 64 {
 			if (h>>j)&1 == 1 {
 				votes[j]++

@@ -230,7 +230,7 @@ func runContentDetector(fix Fixture, r Result) Result {
 	json.Unmarshal(fix.Input, &input)
 
 	det := contentdetector.DetectContentType(input)
-	goType := contentTypeName(det.ContentType)
+	goType := det.ContentType.String()
 
 	var expected struct {
 		ContentType string  `json:"content_type"`
@@ -280,23 +280,3 @@ func runCCR(fix Fixture, r Result) Result {
 	return r
 }
 
-func contentTypeName(ct contentdetector.ContentType) string {
-	switch ct {
-	case contentdetector.PlainText:
-		return "text"
-	case contentdetector.JsonArray:
-		return "json"
-	case contentdetector.SourceCode:
-		return "code"
-	case contentdetector.SearchResults:
-		return "search"
-	case contentdetector.BuildOutput:
-		return "build"
-	case contentdetector.GitDiff:
-		return "diff"
-	case contentdetector.Html:
-		return "html"
-	default:
-		return "unknown"
-	}
-}
