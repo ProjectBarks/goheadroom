@@ -1,123 +1,168 @@
-# goheadroom
+<div align="center"><pre>
+   ██████╗  ██████╗ ██╗  ██╗███████╗ █████╗ ██████╗ ██████╗  ██████╗  ██████╗ ███╗   ███╗
+  ██╔════╝ ██╔═══██╗██║  ██║██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔═══██╗██╔═══██╗████╗ ████║
+  ██║  ███╗██║   ██║███████║█████╗  ███████║██║  ██║██████╔╝██║   ██║██║   ██║██╔████╔██║
+  ██║   ██║██║   ██║██╔══██║██╔══╝  ██╔══██║██║  ██║██╔══██╗██║   ██║██║   ██║██║╚██╔╝██║
+  ╚██████╔╝╚██████╔╝██║  ██║███████╗██║  ██║██████╔╝██║  ██║╚██████╔╝╚██████╔╝██║ ╚═╝ ██║
+   ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚═════╝ ╚═╝     ╚═╝
+              The context compression layer for AI agents — in Go
+</pre></div>
 
-Go implementation of [headroom-core](https://github.com/uber/headroom) -- a context compression layer for LLM agents. Designed for integration into Uber's genai-api LLM gateway.
+<p align="center"><strong>Go port of <a href="https://github.com/chopratejas/headroom">headroom-core</a> &nbsp;·&nbsp; 170/170 parity &nbsp;·&nbsp; 932 tests &nbsp;·&nbsp; 6 compressors &nbsp;·&nbsp; reversible CCR</strong></p>
 
-Headroom sits between callers and LLM providers, transparently compressing conversation context to reduce token usage without losing information the model needs. It uses a **Compress-Cache-Retrieve (CCR)** architecture: compressible content is replaced inline with compact representations, and the original is stashed in a retrieval store so the model can request it back on demand.
+<p align="center">
+  <img src="https://img.shields.io/badge/parity-170%2F170-brightgreen?style=flat-square" alt="Parity: 170/170">
+  <img src="https://img.shields.io/badge/tests-932-blue?style=flat-square" alt="Tests: 932">
+  <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.25+">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License: Apache 2.0">
+</p>
 
-## Architecture
+---
+
+Compresses everything an LLM agent reads -- tool outputs, logs, diffs, JSON arrays, search results -- before it reaches the model. Same answers, fraction of the tokens. Built for Uber's **genai-api** LLM gateway.
+
+Uses a **Compress-Cache-Retrieve (CCR)** architecture: content is compressed inline with compact representations, originals are stashed in a retrieval store, and the model can request them back on demand. Nothing is lost.
+
+## How it works
 
 ```
-caller -> genai-api -> goheadroom -> LLM provider
-                          |
-                    ┌─────┴──────┐
-                    │  LiveZone  │   entry point per API format
-                    └─────┬──────┘
-                          │
-                ┌─────────┼─────────┐
-                v         v         v
-           Anthropic  OpenAI Chat  OpenAI Responses
-                │         │         │
-                v         v         v
-           ┌────────────────────────────┐
-           │   CompressionPipeline      │
-           │                            │
-           │  content detection         │
-           │  -> reformat (minify/template)
-           │  -> offload (bloat estimation)
-           │  -> compress (transform)   │
-           └────────────────────────────┘
-                          │
-              ┌───────────┼───────────┐
-              v           v           v
-         DiffCompressor  LogCompressor  SmartCrusher
-              │           │               │
-              v           v               v
-         hunk removal   line selection   tabular compaction
-         context trim   dedup/cluster    adaptive item selection
-                                         outlier detection
+  Your app / agent
+    │   request body (Anthropic · OpenAI Chat · OpenAI Responses)
+    ▼
+  ┌──────────────────────────────────────────────────────────────┐
+  │  goheadroom                                                  │
+  │  ──────────────────────────────────────────────────────────  │
+  │                                                              │
+  │  LiveZone  ─►  ContentDetector  ─►  CompressionPipeline     │
+  │                                      │                       │
+  │                    ┌─────────────────┼─────────────────┐     │
+  │                    │                 │                 │     │
+  │               DiffCompressor   LogCompressor    SmartCrusher │
+  │               hunk removal     dedup/cluster    CSV compact  │
+  │               context trim     line selection   adaptive-k   │
+  │                    │                 │                 │     │
+  │                    └─────────────────┼─────────────────┘     │
+  │                                      │                       │
+  │                              CacheAligner + CCR store        │
+  └──────────────────────────────────────────────────────────────┘
+    │   compressed body  +  retrieval hashes
+    ▼
+  LLM provider
 ```
 
 ## Transforms
 
-| Transform | What it does |
-|---|---|
-| **DiffCompressor** | Strips lockfile hunks, collapses whitespace-only changes, trims excessive diff context |
-| **LogCompressor** | Deduplicates repeated log lines, clusters by template, selects representative samples |
-| **SmartCrusher** | Compacts JSON arrays to CSV-with-schema format (`[N]{col:type,...}\nrows`), adaptively selects items by diversity and relevance |
-| **SearchCompressor** | Deduplicates near-identical search results using simhash similarity |
-| **ContentDetector** | Classifies input as plain text, JSON, source code, git diff, build output, search results, or HTML |
-| **AdaptiveSizer** | Computes optimal keep-count (k) using bigram diversity curves and knee detection |
+| Transform | What it does | Example |
+|---|---|---|
+| **SmartCrusher** | Compacts JSON arrays to CSV-with-schema | `[100]{id:int,name:str}\n1,alice\n2,bob` |
+| **DiffCompressor** | Strips lockfile hunks, collapses whitespace-only changes | 2,364 B -> 1,913 B |
+| **LogCompressor** | Deduplicates repeated lines, clusters by template | `[297 lines omitted: 1 ERROR, 300 INFO]` |
+| **SearchCompressor** | Deduplicates near-identical results via simhash | 10 results -> 4 unique |
+| **ContentDetector** | Classifies as text/json/code/diff/build/search/html | `SourceCode:0.85` |
+| **AdaptiveSizer** | Computes optimal keep-count via bigram diversity curves | 100 items -> k=12 |
 
-## Usage
+## Quick start
 
 ```go
-import "github.com/uber/goheadroom"
+import (
+    "github.com/uber/goheadroom"
+    "github.com/uber/goheadroom/compressionpolicy"
+)
 
-req := headroom.CompressRequest{
+resp, err := headroom.CompressLiveZone(headroom.CompressRequest{
     Body:   requestBody,
     Format: headroom.FormatOpenAIChat,
     Mode:   compressionpolicy.ModeAggressive,
-}
+})
+// resp.Body = compressed request, ready to forward
+// resp.Stats = per-transform metrics
+```
 
-resp, err := headroom.CompressLiveZone(req)
-if err != nil {
-    // handle error
-}
-// resp.Body is the compressed request body
-// resp.Stats has per-transform metrics
+### Using individual transforms
+
+```go
+// Compress a git diff
+dc := diffcompressor.New(diffcompressor.DefaultConfig())
+result := dc.Compress(diffContent, "")
+fmt.Println(result.Compressed)
+
+// Crush a JSON array
+crusher := smartcrusher.NewSmartCrusherBuilder(
+    smartcrusher.DefaultSmartCrusherConfig(),
+).Build()
+result := crusher.Crush(jsonContent, query, 0.5)
+fmt.Println(result.Compressed)
+
+// Compress logs
+lc := logcompressor.New(logcompressor.DefaultConfig())
+result, stats := lc.Compress(logContent, 0.0)
+fmt.Println(result.Compressed)
 ```
 
 ## Project structure
 
 ```
-compress.go                  top-level CompressLiveZone API
-authmode/                    auth mode detection (codex, API key, etc.)
-cachecontrol/                cache-control header parsing
-ccr/                         compress-cache-retrieve store interface + in-memory impl
-compressionpolicy/           compression mode selection (none/moderate/aggressive)
-relevance/                   query relevance scoring for context prioritization
-signals/                     signal extraction from request metadata
-tokenizer/                   tiktoken-compatible token counting (gpt-4o, claude, etc.)
+compress.go                     CompressLiveZone — top-level entry point
+authmode/                       auth mode detection (codex, API key, etc.)
+cachecontrol/                   cache-control header parsing
+ccr/                            compress-cache-retrieve store interface
+compressionpolicy/              mode selection (none / moderate / aggressive)
+relevance/                      query relevance scoring
+signals/                        signal extraction from request metadata
+tokenizer/                      tiktoken-compatible token counting
+
 transforms/
-  adaptivesizer/             optimal-k computation via bigram curves + knee detection
-  anchorselector/            anchor-based item selection preserving boundaries
-  contentdetector/           content type classification (text/json/diff/code/...)
-  diffcompressor/            git diff compression (lockfiles, context, whitespace)
-  livezone/                  per-format live zone compression (Anthropic, OpenAI)
-  logcompressor/             log dedup, template clustering, line selection
-  pipeline/                  orchestrator chaining reformat -> offload -> compress
-    offloads/                bloat estimation wrappers per content type
-    reformats/               minification and template extraction
-  searchcompressor/          search result deduplication via simhash
-  smartcrusher/              JSON array compaction, adaptive item selection
-    compaction/              tabular CSV-with-schema compaction engine
+├── adaptivesizer/              optimal-k via bigram curves + knee detection
+├── anchorselector/             boundary-preserving item selection
+├── contentdetector/            content type classification
+├── diffcompressor/             git diff compression
+├── livezone/                   per-format compression (Anthropic, OpenAI)
+├── logcompressor/              log dedup + template clustering
+├── pipeline/                   reformat -> offload -> compress orchestrator
+│   ├── offloads/               bloat estimation per content type
+│   └── reformats/              minification + template extraction
+├── searchcompressor/           simhash-based result dedup
+└── smartcrusher/               JSON array compaction engine
+    └── compaction/             tabular CSV-with-schema renderer
 ```
 
 ## Parity
 
-170/170 test fixtures produce byte-identical output between Go and Rust implementations across all transforms: diff compressor, log compressor, smart crusher, content detector, tokenizer, and CCR.
+<table>
+<tr><td><strong>170 / 170</strong></td><td>byte-identical output vs Rust across all transforms</td></tr>
+<tr><td><strong>932</strong></td><td>tests across 22 packages</td></tr>
+<tr><td><strong>6</strong></td><td>compressor types with full coverage</td></tr>
+</table>
 
-Generate the parity report:
+Fixture coverage spans diff compressor (27), log compressor (20), smart crusher (17), content detector (21), tokenizer (40), CCR (25), and cache aligner (20).
 
 ```bash
+# generate the interactive parity report
 go build -o /tmp/goheadroom-bench ./cmd/bench/
 python3 scripts/generate-parity-report.py
 open parity-report.html
 ```
 
-## Tests
+## Build tags
+
+| Tag | What it enables | Fallback without it |
+|---|---|---|
+| `hf_tokenizer` | HuggingFace tokenizers via libtokenizers | tiktoken-go (pure Go) |
+| `onnx` | ONNX runtime for ML-based content detection | heuristic rules |
+
+Default build requires **zero CGO** and no external dependencies.
 
 ```bash
+# standard build (pure Go, no CGO)
+go build ./...
+
+# with HuggingFace tokenizers
+go build -tags hf_tokenizer ./...
+
+# run all tests
 go test ./...
 ```
 
-932 tests across 22 packages.
+## License
 
-## Build tags
-
-Two optional build tags enable CGO-dependent features:
-
-- `hf_tokenizer` -- uses HuggingFace tokenizers via libtokenizers for exact token counts
-- `onnx` -- enables ONNX runtime for ML-based content detection
-
-Without these tags, the library uses pure-Go fallbacks (tiktoken-go for tokenization, heuristic rules for detection).
+Apache 2.0
