@@ -1,1 +1,5 @@
 logs/
+goheadroom-bench
+goheadroom.test
+libtokenizers.a
+*.prof

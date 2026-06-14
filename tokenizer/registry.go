@@ -24,6 +24,9 @@ func GetTokenizer(model string) Tokenizer {
 }
 
 func resolveTokenizer(model string) Tokenizer {
+	if t, err := newTiktokenFFI(model); err == nil {
+		return t
+	}
 	if t, err := NewTiktokenCounter(model); err == nil {
 		return t
 	}
