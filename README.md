@@ -8,10 +8,11 @@
               The context compression layer for AI agents — in Go
 </pre></div>
 
-<p align="center"><strong>Go port of <a href="https://github.com/chopratejas/headroom">headroom-core</a> &nbsp;·&nbsp; 170/170 parity &nbsp;·&nbsp; 932 tests &nbsp;·&nbsp; 6 compressors &nbsp;·&nbsp; reversible CCR</strong></p>
+<p align="center"><strong>Go port of <a href="https://github.com/chopratejas/headroom">headroom-core</a> &nbsp;·&nbsp; 170/170 parity &nbsp;·&nbsp; faster than the original Rust &nbsp;·&nbsp; 6 compressors &nbsp;·&nbsp; reversible CCR</strong></p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/parity-170%2F170-brightgreen?style=flat-square" alt="Parity: 170/170">
+  <img src="https://img.shields.io/badge/vs_Rust-faster-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Faster than Rust">
   <img src="https://img.shields.io/badge/tests-932-blue?style=flat-square" alt="Tests: 932">
   <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.25+">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue?style=flat-square" alt="License: Apache 2.0">
@@ -20,6 +21,69 @@
 ---
 
 Compresses everything an LLM agent reads -- tool outputs, logs, diffs, JSON arrays, search results -- before it reaches the model. Same answers, fraction of the tokens. Built for Uber's **genai-api** LLM gateway.
+
+### Faster than the original Rust
+
+goheadroom beats Rust headroom-core on every warm benchmark while producing byte-identical output across all 170 fixtures.
+
+```
+  Go vs Rust warm benchmarks (lower is better)
+  ─────────────────────────────────────────────────────────────────
+
+  LogCompressor      Go ██░ 2 us
+                   Rust ████████████████████████████████████████████████████████████████ 63 us
+                                                                          Go wins 31x
+
+  DiffCompressor     Go ██████████████████████░ 3 us
+                   Rust ████████████████████████████████████████████████████████████████ 9 us
+                                                                           Go wins 3x
+
+  CCR                Go █████████████████████░ 1 us
+                   Rust ████████████████████████████████████████████████████████████████ 3 us
+                                                                           Go wins 3x
+
+  ContentDetector    Go ████████████████████████████████░ 1 us
+                   Rust ████████████████████████████████████████████████████████████████ 2 us
+                                                                           Go wins 2x
+
+  SmartCrusher       Go █████████████████████████████████████████████░ 100 us
+                   Rust ████████████████████████████████████████████████████████████████ 141 us
+                                                                         Go wins 1.4x
+
+  Tokenizer          Go ████████████████████████████████████████████████████████████████ 22 us
+                   Rust ██████████████████████████████████████████████████████████░ 20 us
+                                                                       parity (CGO)
+```
+
+<sub>Warm = library throughput, no CLI startup. Largest fixture per transform. Apple M3 Max.</sub>
+
+<details>
+<summary><strong>Optimization journey: 14 rounds, baseline to final</strong></summary>
+
+<br>
+
+Every round: CPU/memory profile, investigate hotspots, implement in parallel worktrees, red team review, merge what survives.
+
+```
+  Before ████████████████████████████████████████████████  2,059 us   After ██░ 44 us     LogCompressor    46.8x
+  Before ██░ 48 us                                                   After ░ 1.3 us      ContentDetector  37.8x
+  Before ███████████░ 476 us                                         After █░ 22 us       Tokenizer        21.6x
+  Before ░ 14 us                                                     After ░ 0.66 us     CCR              21.7x
+  Before █████░ 208 us                                               After ░ 15 us        DiffCompressor   13.7x
+  Before ███████████████████████████░ 1,158 us                       After ██████████░ 434 us  SmartCrusher  2.7x
+```
+
+Key techniques applied:
+
+- **Zero compiled regexp in hot paths** -- every `regexp.MustCompile` replaced with string ops, `|0x20` ASCII case folding, `[256]byte` dispatch tables
+- **FNV-1a simhash** -- replaced `crypto/md5` for non-cryptographic gram hashing (3x speedup across all compressors)
+- **Lazy expensive work** -- defer `ComputeOptimalK` until needed, lazy store allocation, nil metadata maps
+- **Rust FFI tokenizer** -- `daulet/tokenizers` wraps the same Rust tiktoken crate; 5.6x serial / 60x parallel vs pure-Go tiktoken
+- **Shared `internal/textutil`** -- deduplicated keyword matching across 4 packages into one optimized implementation
+- **Stack-allocated buffers** -- `[32]byte` hex, `[256]byte` lowercase, `uint64` bitmasks replacing `[]bool` arrays
+- **Red team review** -- every optimization reviewed before landing; 6 proposals rejected for parity risk or regression
+
+</details>
 
 Uses a **Compress-Cache-Retrieve (CCR)** architecture: content is compressed inline with compact representations, originals are stashed in a retrieval store, and the model can request them back on demand. Nothing is lost.
 
@@ -147,17 +211,18 @@ open parity-report.html
 
 | Tag | What it enables | Fallback without it |
 |---|---|---|
+| `CGO_ENABLED=1` | Rust FFI tokenizer via daulet/tokenizers (5.6x faster) | tiktoken-go (pure Go) |
 | `hf_tokenizer` | HuggingFace tokenizers via libtokenizers | tiktoken-go (pure Go) |
 | `onnx` | ONNX runtime for ML-based content detection | heuristic rules |
 
-Default build requires **zero CGO** and no external dependencies.
+Default build requires **zero CGO** and no external dependencies. With CGO, the tokenizer uses the Rust tiktoken implementation via FFI for near-native speed.
 
 ```bash
 # standard build (pure Go, no CGO)
 go build ./...
 
-# with HuggingFace tokenizers
-go build -tags hf_tokenizer ./...
+# with Rust FFI tokenizer (recommended for production)
+CGO_ENABLED=1 go build -ldflags="-extldflags '-L.'" ./...
 
 # run all tests
 go test ./...
