@@ -69,8 +69,10 @@ type LogTemplateConfig struct {
 
 // OffloadConfigs holds per-offload configuration.
 type OffloadConfigs struct {
-	Json      JsonOffloadConfig `toml:"json"`
-	DiffNoise DiffNoiseConfig   `toml:"diff_noise"`
+	Json          JsonOffloadConfig          `toml:"json"`
+	DiffNoise     DiffNoiseConfig            `toml:"diff_noise"`
+	JsonStructure JsonStructureOffloadConfig `toml:"json_structure"`
+	Code          CodeOffloadConfig          `toml:"code"`
 }
 
 // JsonOffloadConfig tunes the JsonOffload (SmartCrusher wrapper).
@@ -84,6 +86,16 @@ type DiffNoiseConfig struct {
 	MinLines               int      `toml:"min_lines"`
 	LockfileSuffixes       []string `toml:"lockfile_suffixes"`
 	DropWhitespaceOnlyHunks bool    `toml:"drop_whitespace_only_hunks"`
+}
+
+// JsonStructureOffloadConfig tunes the JsonStructureOffload.
+type JsonStructureOffloadConfig struct {
+	MinInputLen int `toml:"min_input_len"`
+}
+
+// CodeOffloadConfig tunes the CodeOffload.
+type CodeOffloadConfig struct {
+	MinInputLen int `toml:"min_input_len"`
 }
 
 // DefaultPipelineConfig loads the embedded default configuration.

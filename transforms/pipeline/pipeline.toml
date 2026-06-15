@@ -149,3 +149,21 @@ lockfile_suffixes = [
 # show up in formatter / linter commits and carry no signal the LLM
 # needs to reason about.
 drop_whitespace_only_hunks = true
+
+# ─── JSON structure offload config ─────────────────────────────────
+# JsonStructureOffload wraps jsoncompressor: preserves keys/structure
+# while eliding long string values. Applies to JSON objects and arrays.
+
+[offload.json_structure]
+# Skip inputs shorter than this (bytes). Small JSON isn't worth the CCR
+# overhead.
+min_input_len = 100
+
+# ─── Code offload config ────────────────────────────────────────────
+# CodeOffload wraps codecompressor: AST-based body elision for 8
+# languages. Preserves imports, types, and signatures.
+
+[offload.code]
+# Skip inputs shorter than this (bytes). Very short snippets rarely
+# have compressible bodies.
+min_input_len = 200
