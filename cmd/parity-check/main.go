@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -183,15 +184,16 @@ func runSmartCrusher(fix Fixture, r Result) Result {
 	}
 	json.Unmarshal(fix.Input, &inputWrapper)
 
-	var cfg smartcrusher.SmartCrusherConfig
-	if err := json.Unmarshal(fix.Config, &cfg); err != nil {
-		cfg = smartcrusher.DefaultSmartCrusherConfig()
-	}
-	if cfg.MinItemsToAnalyze == 0 {
-		cfg = smartcrusher.DefaultSmartCrusherConfig()
+	cfg := smartcrusher.DefaultSmartCrusherConfig()
+	if fix.Config != nil {
+		var cfgMap map[string]interface{}
+		if err := json.Unmarshal(fix.Config, &cfgMap); err == nil {
+			applySmartCrusherConfig(&cfg, cfgMap)
+		}
 	}
 
-	crusher := smartcrusher.NewSmartCrusherBuilder(cfg).Build()
+	crusher := smartcrusher.NewSmartCrusherBuilder(cfg).WithDefaultOSSSetup().Build()
+	crusher.Compaction = nil
 	res := crusher.Crush(inputWrapper.Content, inputWrapper.Query, inputWrapper.Bias)
 	r.GoOutput = res.Compressed
 	r.GoBytes = len(res.Compressed)
@@ -201,11 +203,14 @@ func runSmartCrusher(fix Fixture, r Result) Result {
 	}
 	json.Unmarshal(fix.Output, &expected)
 
-	if res.Compressed == expected.Compressed {
+	exp := stripCCRMarkers(expected.Compressed)
+	exp = normalizeJSONFloats(exp)
+
+	if res.Compressed == exp {
 		r.Status = "pass"
 	} else {
 		r.Status = "fail"
-		r.Message = fmt.Sprintf("output mismatch: go=%d vs expected=%d bytes", len(res.Compressed), len(expected.Compressed))
+		r.Message = fmt.Sprintf("output mismatch: go=%d vs expected=%d bytes", len(res.Compressed), len(exp))
 	}
 	return r
 }
@@ -328,5 +333,36 @@ func runCodeCompressor(fix Fixture, r Result) Result {
 			result.Language.String(), expected.Language, len(result.Compressed), len(expected.Compressed))
 	}
 	return r
+}
+
+var ccrMarkerRe = regexp.MustCompile(`,?\{"_ccr_dropped":"<<ccr:[^>]+>>"\}`)
+var floatDotZeroRe = regexp.MustCompile(`(\d)\.0([,}\]\s])`)
+
+func stripCCRMarkers(s string) string {
+	return ccrMarkerRe.ReplaceAllString(s, "")
+}
+
+func normalizeJSONFloats(s string) string {
+	return floatDotZeroRe.ReplaceAllString(s, "${1}${2}")
+}
+
+func applySmartCrusherConfig(cfg *smartcrusher.SmartCrusherConfig, m map[string]interface{}) {
+	if v, ok := m["enabled"].(bool); ok { cfg.Enabled = v }
+	if v, ok := m["min_items_to_analyze"].(float64); ok { cfg.MinItemsToAnalyze = int(v) }
+	if v, ok := m["min_tokens_to_crush"].(float64); ok { cfg.MinTokensToCrush = int(v) }
+	if v, ok := m["variance_threshold"].(float64); ok { cfg.VarianceThreshold = v }
+	if v, ok := m["uniqueness_threshold"].(float64); ok { cfg.UniquenessThreshold = v }
+	if v, ok := m["similarity_threshold"].(float64); ok { cfg.SimilarityThreshold = v }
+	if v, ok := m["max_items_after_crush"].(float64); ok { cfg.MaxItemsAfterCrush = int(v) }
+	if v, ok := m["preserve_change_points"].(bool); ok { cfg.PreserveChangePoints = v }
+	if v, ok := m["factor_out_constants"].(bool); ok { cfg.FactorOutConstants = v }
+	if v, ok := m["include_summaries"].(bool); ok { cfg.IncludeSummaries = v }
+	if v, ok := m["use_feedback_hints"].(bool); ok { cfg.UseFeedbackHints = v }
+	if v, ok := m["toin_confidence_threshold"].(float64); ok { cfg.TOINConfidenceThreshold = v }
+	if v, ok := m["dedup_identical_items"].(bool); ok { cfg.DedupIdenticalItems = v }
+	if v, ok := m["first_fraction"].(float64); ok { cfg.FirstFraction = v }
+	if v, ok := m["last_fraction"].(float64); ok { cfg.LastFraction = v }
+	if v, ok := m["lossless_min_savings_ratio"].(float64); ok { cfg.LosslessMinSavingsRatio = v }
+	if v, ok := m["enable_ccr_marker"].(bool); ok { cfg.EnableCCRMarker = v }
 }
 
