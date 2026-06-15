@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Parity report generator: runs Go and Rust CLIs on every fixture,
+Parity report generator: runs Go, Rust, and Python CLIs on every fixture,
 compares outputs, times cold (CLI) and warm (library) paths,
-generates self-contained HTML with diffs and dual benchmarks.
+generates self-contained HTML with diffs and triple benchmarks.
 
 Usage:
-    python3 scripts/generate-parity-report.py [--go-bin PATH] [--rust-bin PATH] [--fixtures DIR] [--out PATH]
+    python3 scripts/generate-parity-report.py [--go-bin PATH] [--rust-bin PATH] [--python-bin PATH] [--fixtures DIR] [--out PATH]
 """
 import argparse, json, os, subprocess, sys, time, difflib
 from pathlib import Path
@@ -23,6 +23,8 @@ def parse_args():
                     help="Path to Go bench binary (default: $GO_BENCH_BIN or ./goheadroom-bench)")
     p.add_argument("--rust-bin", default=os.environ.get("RUST_BENCH_BIN", ""),
                     help="Path to Rust bench binary (default: $RUST_BENCH_BIN)")
+    p.add_argument("--python-bin", default=os.environ.get("PYTHON_BENCH_BIN", ""),
+                    help="Path to Python bench script (default: $PYTHON_BENCH_BIN)")
     p.add_argument("--fixtures", default=str(PROJECT_DIR / "testdata" / "parity"),
                     help="Path to parity fixtures directory")
     p.add_argument("--out", default=str(PROJECT_DIR / "parity-report.html"),
@@ -51,6 +53,25 @@ def run_timed(binary, fixture_path, runs=3):
         t0 = time.perf_counter()
         try:
             r = subprocess.run([binary, fixture_path], capture_output=True, text=True, timeout=10)
+            elapsed = (time.perf_counter() - t0) * 1000
+            if r.returncode == 0:
+                stdout = r.stdout
+                rc = 0
+                best_ms = min(best_ms, elapsed)
+            elif rc != 0:
+                stdout = r.stderr[:200]
+        except Exception as e:
+            stdout = f"ERROR: {e}"
+    return stdout, rc, best_ms if best_ms < float("inf") else 0
+
+def run_timed_list(cmd_list, runs=3):
+    best_ms = float("inf")
+    stdout = ""
+    rc = 1
+    for _ in range(runs):
+        t0 = time.perf_counter()
+        try:
+            r = subprocess.run(cmd_list, capture_output=True, text=True, timeout=30)
             elapsed = (time.perf_counter() - t0) * 1000
             if r.returncode == 0:
                 stdout = r.stdout
@@ -129,6 +150,14 @@ def main():
     if not rust_bin:
         print("WARNING: Rust bench binary not found. Rust columns will be empty.", file=sys.stderr)
 
+    python_bin = args.python_bin
+    if not python_bin:
+        candidate = PROJECT_DIR / "scripts" / "python-bench.py"
+        if candidate.exists():
+            python_bin = f"python3 {candidate}"
+    if python_bin:
+        print(f"Python binary: {python_bin}", file=sys.stderr)
+
     print(f"Go binary:   {go_bin}", file=sys.stderr)
     print(f"Rust binary: {rust_bin or '(not found)'}", file=sys.stderr)
 
@@ -151,6 +180,14 @@ def main():
         rust_out, rust_rc, rust_ms = "", 1, 0
         if rust_bin:
             rust_out, rust_rc, rust_ms = run_timed(rust_bin, str(fpath), cold_runs)
+
+        python_out, python_rc, python_ms = "", 1, 0
+        if python_bin:
+            try:
+                python_cmd = python_bin.split() + [str(fpath)]
+                python_out, python_rc, python_ms = run_timed_list(python_cmd, cold_runs)
+            except Exception:
+                pass
 
         go_norm = normalize_output(transform, go_out)
         rust_norm = normalize_output(transform, rust_out)
@@ -190,10 +227,13 @@ def main():
             "status": status,
             "go_ms": round(go_ms, 2),
             "rust_ms": round(rust_ms, 2),
+            "python_ms": round(python_ms, 2) if python_ms else 0,
             "go_bytes": len(go_out),
             "rust_bytes": len(rust_out),
+            "python_bytes": len(python_out),
             "go_out": go_out[:1500],
             "rust_out": rust_out[:1500],
+            "python_out": python_out[:1500],
             "diff_html": diff_html,
             "go_warm_us": round(go_warm_ns / 1000, 1) if go_warm_ns else 0,
             "rust_warm_us": round(rust_warm_ns / 1000, 1) if rust_warm_ns else 0,
@@ -238,6 +278,9 @@ def generate_html(results, out_path):
         rust_c_avg = sum(rust_cold) / len(rust_cold) if rust_cold else 0
         cold_ratio = f"{go_c_avg / rust_c_avg:.2f}x" if rust_c_avg > 0 and go_c_avg > 0 else "-"
 
+        python_cold = [e["python_ms"] for e in entries if e["python_ms"] > 0]
+        python_c_avg = sum(python_cold) / len(python_cold) if python_cold else 0
+
         n_pass = sum(1 for e in entries if e["status"] == "pass")
         n_total = len(entries)
         parity_badge = f'<span style="color:#3fb950">{n_pass}/{n_total}</span>' if n_pass == n_total else f'<span style="color:#f85149">{n_pass}/{n_total}</span>'
@@ -251,6 +294,7 @@ def generate_html(results, out_path):
             f'<td class="mono r">{warm_ratio}</td>'
             f'<td class="mono r go">{go_c_avg:.1f}ms</td>'
             f'<td class="mono r rust">{rust_c_avg:.1f}ms</td>'
+            f'<td class="mono r python">{python_c_avg:.1f}ms</td>'
             f'<td class="mono r">{cold_ratio}</td>'
             f'</tr>'
         )
@@ -261,7 +305,7 @@ def generate_html(results, out_path):
         cat_pass = sum(1 for e in entries if e["status"] == "pass")
         cat_total = len(entries)
         cat_color = "#3fb950" if cat_pass == cat_total else "#f85149"
-        rows.append(f'''<tr class="cat-row"><td colspan="11"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
+        rows.append(f'''<tr class="cat-row"><td colspan="13"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
 
         for e in sorted(entries, key=lambda x: x["fixture"]):
             s = e["status"]
@@ -288,15 +332,17 @@ def generate_html(results, out_path):
 <td>{escape(e["transform"])}</td>
 <td class="mono r">{e["go_bytes"]}</td>
 <td class="mono r">{e["rust_bytes"]}</td>
+<td class="mono r">{e["python_bytes"]}</td>
 <td class="mono r go">{fmt_us(e["go_warm_us"])}</td>
 <td class="mono r rust">{fmt_us(e["rust_warm_us"])}</td>
 <td class="mono r">{warm_ratio}</td>
 <td class="mono r go">{e["go_ms"]:.1f}</td>
 <td class="mono r rust">{e["rust_ms"]:.1f}</td>
+<td class="mono r python">{e["python_ms"]:.1f}</td>
 <td class="mono r">{cli_ratio}</td>
 </tr>''')
             if has_diff:
-                rows.append(f'''<tr class="diff-row hidden" id="diff_{detail_id}"><td colspan="11"><div class="diff-box"><pre>{e["diff_html"]}</pre></div></td></tr>''')
+                rows.append(f'''<tr class="diff-row hidden" id="diff_{detail_id}"><td colspan="13"><div class="diff-box"><pre>{e["diff_html"]}</pre></div></td></tr>''')
 
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -336,16 +382,19 @@ td.r{{text-align:right}}
 tr.fhide{{display:none}}
 td.go{{color:#8db9e8}}
 td.rust{{color:#f0a870}}
+td.python{{color:#c0a0e0}}
 th.go{{color:#00add8!important}}
 th.rust{{color:#f97316!important}}
+th.python{{color:#a855f7!important}}
 .summary-table{{width:100%;margin-bottom:1.5rem}}
 .summary-table td,.summary-table th{{padding:.5rem 1rem}}
 .summary-table td.go{{color:#8db9e8}}
 .summary-table td.rust{{color:#f0a870}}
+.summary-table td.python{{color:#c0a0e0}}
 .th-group{{text-align:center!important;border-bottom:2px solid #30363d;font-size:.65rem;padding:.3rem .8rem}}
 </style></head><body><div class="wrap">
 <h1>goheadroom Parity Report</h1>
-<p class="sub">Go vs Rust: parity, warm (library throughput), and cold (CLI w/ startup) benchmarks across {total} fixtures.</p>
+<p class="sub">Go vs Rust vs Python: parity, warm (library throughput), and cold (CLI w/ startup) benchmarks across {total} fixtures.</p>
 
 <div class="hero">
 <div class="ring" style="background:conic-gradient(#3fb950 0% {pct}%,#30363d {pct}% 100%)">
@@ -363,11 +412,11 @@ th.rust{{color:#f97316!important}}
 <th rowspan="2">Category</th>
 <th rowspan="2" class="r">Parity</th>
 <th colspan="3" class="th-group" style="color:#58a6ff">Warm (library, no startup)</th>
-<th colspan="3" class="th-group" style="color:#f97316">Cold (CLI, with startup)</th>
+<th colspan="4" class="th-group" style="color:#f97316">Cold (CLI, with startup)</th>
 </tr>
 <tr>
 <th class="r go">Go</th><th class="r rust">Rust</th><th class="r">Ratio</th>
-<th class="r go">Go</th><th class="r rust">Rust</th><th class="r">Ratio</th>
+<th class="r go">Go</th><th class="r rust">Rust</th><th class="r python">Python</th><th class="r">Ratio</th>
 </tr>
 </thead><tbody>
 {"".join(summary_rows)}
@@ -383,9 +432,9 @@ th.rust{{color:#f97316!important}}
 <table><thead>
 <tr>
 <th></th><th>Fixture</th><th>Transform</th>
-<th class="r">Go B</th><th class="r">Rust B</th>
+<th class="r">Go B</th><th class="r">Rust B</th><th class="r">Py B</th>
 <th class="r go">Go Warm</th><th class="r rust">Rust Warm</th><th class="r">Ratio</th>
-<th class="r go">Go CLI</th><th class="r rust">Rust CLI</th><th class="r">Ratio</th>
+<th class="r go">Go CLI</th><th class="r rust">Rust CLI</th><th class="r python">Py CLI</th><th class="r">Ratio</th>
 </tr></thead><tbody>
 {"".join(rows)}
 </tbody></table>
