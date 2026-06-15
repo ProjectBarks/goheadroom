@@ -9,8 +9,10 @@ import (
 
 	"github.com/uber/goheadroom/ccr"
 	"github.com/uber/goheadroom/tokenizer"
+	"github.com/uber/goheadroom/transforms/codecompressor"
 	"github.com/uber/goheadroom/transforms/contentdetector"
 	"github.com/uber/goheadroom/transforms/diffcompressor"
+	"github.com/uber/goheadroom/transforms/jsoncompressor"
 	"github.com/uber/goheadroom/transforms/logcompressor"
 	"github.com/uber/goheadroom/transforms/smartcrusher"
 )
@@ -130,6 +132,20 @@ func makeRunner(fix Fixture) func() string {
 
 	case "cache_aligner":
 		return func() string { return "SKIP:cache_aligner" }
+
+	case "json_compressor":
+		var input string
+		json.Unmarshal(fix.Input, &input)
+		return func() string {
+			return jsoncompressor.Compress(input, jsoncompressor.DefaultConfig()).Compressed
+		}
+
+	case "code_compressor":
+		var input string
+		json.Unmarshal(fix.Input, &input)
+		return func() string {
+			return codecompressor.Compress(input).Compressed
+		}
 
 	default:
 		return nil
