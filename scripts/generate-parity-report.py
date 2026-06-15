@@ -99,6 +99,22 @@ def run_warm(binary, fixture_path, iterations=50):
         pass
     return 0
 
+def run_warm_list(cmd_list, fixture_path, iterations=50):
+    """Run command list with --bench N, return ns/op from stderr."""
+    try:
+        r = subprocess.run(
+            cmd_list + [fixture_path, "--bench", str(iterations)],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode == 0:
+            for line in r.stderr.strip().splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    return int(line)
+    except Exception:
+        pass
+    return 0
+
 def normalize_output(transform, output):
     if transform == "content_detector":
         mapping = {
@@ -219,6 +235,9 @@ def main():
             iters = max(10, warm_iters // 5)
         go_warm_ns = run_warm(go_bin, str(fpath), iters) if go_rc == 0 and not skip_warm else 0
         rust_warm_ns = run_warm(rust_bin, str(fpath), iters) if rust_bin and rust_rc == 0 and not skip_warm else 0
+        python_warm_ns = 0
+        if python_bin and python_rc == 0 and not skip_warm:
+            python_warm_ns = run_warm_list(python_bin.split(), str(fpath), iters)
 
         results.append({
             "fixture": fpath.name,
@@ -237,6 +256,7 @@ def main():
             "diff_html": diff_html,
             "go_warm_us": round(go_warm_ns / 1000, 1) if go_warm_ns else 0,
             "rust_warm_us": round(rust_warm_ns / 1000, 1) if rust_warm_ns else 0,
+            "python_warm_us": round(python_warm_ns / 1000, 1) if python_warm_ns else 0,
         })
         if (i+1) % 20 == 0:
             print(f"  {i+1}/{len(fixtures)}...", file=sys.stderr)
@@ -267,11 +287,13 @@ def generate_html(results, out_path):
         entries = cats[cat]
         go_warm = [e["go_warm_us"] for e in entries if e["go_warm_us"] > 0]
         rust_warm = [e["rust_warm_us"] for e in entries if e["rust_warm_us"] > 0]
+        python_warm = [e["python_warm_us"] for e in entries if e["python_warm_us"] > 0]
         go_cold = [e["go_ms"] for e in entries if e["go_ms"] > 0]
         rust_cold = [e["rust_ms"] for e in entries if e["rust_ms"] > 0]
 
         go_w_avg = sum(go_warm) / len(go_warm) if go_warm else 0
         rust_w_avg = sum(rust_warm) / len(rust_warm) if rust_warm else 0
+        python_w_avg = sum(python_warm) / len(python_warm) if python_warm else 0
         warm_ratio = f"{go_w_avg / rust_w_avg:.2f}x" if rust_w_avg > 0 and go_w_avg > 0 else "-"
 
         go_c_avg = sum(go_cold) / len(go_cold) if go_cold else 0
@@ -291,6 +313,7 @@ def generate_html(results, out_path):
             f'<td class="mono r">{parity_badge}</td>'
             f'<td class="mono r go">{fmt_us(go_w_avg)}</td>'
             f'<td class="mono r rust">{fmt_us(rust_w_avg)}</td>'
+            f'<td class="mono r python">{fmt_us(python_w_avg)}</td>'
             f'<td class="mono r">{warm_ratio}</td>'
             f'<td class="mono r go">{go_c_avg:.1f}ms</td>'
             f'<td class="mono r rust">{rust_c_avg:.1f}ms</td>'
@@ -305,7 +328,7 @@ def generate_html(results, out_path):
         cat_pass = sum(1 for e in entries if e["status"] == "pass")
         cat_total = len(entries)
         cat_color = "#3fb950" if cat_pass == cat_total else "#f85149"
-        rows.append(f'''<tr class="cat-row"><td colspan="13"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
+        rows.append(f'''<tr class="cat-row"><td colspan="15"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
 
         for e in sorted(entries, key=lambda x: x["fixture"]):
             s = e["status"]
@@ -335,6 +358,7 @@ def generate_html(results, out_path):
 <td class="mono r">{e["python_bytes"]}</td>
 <td class="mono r go">{fmt_us(e["go_warm_us"])}</td>
 <td class="mono r rust">{fmt_us(e["rust_warm_us"])}</td>
+<td class="mono r python">{fmt_us(e["python_warm_us"])}</td>
 <td class="mono r">{warm_ratio}</td>
 <td class="mono r go">{e["go_ms"]:.1f}</td>
 <td class="mono r rust">{e["rust_ms"]:.1f}</td>
@@ -342,7 +366,7 @@ def generate_html(results, out_path):
 <td class="mono r">{cli_ratio}</td>
 </tr>''')
             if has_diff:
-                rows.append(f'''<tr class="diff-row hidden" id="diff_{detail_id}"><td colspan="13"><div class="diff-box"><pre>{e["diff_html"]}</pre></div></td></tr>''')
+                rows.append(f'''<tr class="diff-row hidden" id="diff_{detail_id}"><td colspan="15"><div class="diff-box"><pre>{e["diff_html"]}</pre></div></td></tr>''')
 
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -411,11 +435,11 @@ th.python{{color:#a855f7!important}}
 <tr>
 <th rowspan="2">Category</th>
 <th rowspan="2" class="r">Parity</th>
-<th colspan="3" class="th-group" style="color:#58a6ff">Warm (library, no startup)</th>
+<th colspan="4" class="th-group" style="color:#58a6ff">Warm (library, no startup)</th>
 <th colspan="4" class="th-group" style="color:#f97316">Cold (CLI, with startup)</th>
 </tr>
 <tr>
-<th class="r go">Go</th><th class="r rust">Rust</th><th class="r">Ratio</th>
+<th class="r go">Go</th><th class="r rust">Rust</th><th class="r python">Python</th><th class="r">Ratio</th>
 <th class="r go">Go</th><th class="r rust">Rust</th><th class="r python">Python</th><th class="r">Ratio</th>
 </tr>
 </thead><tbody>
@@ -433,7 +457,7 @@ th.python{{color:#a855f7!important}}
 <tr>
 <th></th><th>Fixture</th><th>Transform</th>
 <th class="r">Go B</th><th class="r">Rust B</th><th class="r">Py B</th>
-<th class="r go">Go Warm</th><th class="r rust">Rust Warm</th><th class="r">Ratio</th>
+<th class="r go">Go Warm</th><th class="r rust">Rust Warm</th><th class="r python">Py Warm</th><th class="r">Ratio</th>
 <th class="r go">Go CLI</th><th class="r rust">Rust CLI</th><th class="r python">Py CLI</th><th class="r">Ratio</th>
 </tr></thead><tbody>
 {"".join(rows)}
