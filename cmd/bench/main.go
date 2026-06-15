@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/uber/goheadroom/cachecontrol"
 	"github.com/uber/goheadroom/ccr"
 	"github.com/uber/goheadroom/tokenizer"
 	"github.com/uber/goheadroom/transforms/codecompressor"
@@ -131,7 +132,13 @@ func makeRunner(fix Fixture) func() string {
 		return func() string { return "OK:empty" }
 
 	case "cache_aligner":
-		return func() string { return "SKIP:cache_aligner" }
+		var messages []interface{}
+		json.Unmarshal(fix.Input, &messages)
+		return func() string {
+			wrapped := map[string]interface{}{"messages": messages}
+			fc := cachecontrol.ComputeFrozenCount(wrapped)
+			return fmt.Sprintf("frozen_count=%d,messages=%d", fc, len(messages))
+		}
 
 	case "json_compressor":
 		var input string

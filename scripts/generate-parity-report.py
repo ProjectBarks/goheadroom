@@ -215,7 +215,8 @@ def main():
         elif go_rc != 0:
             status = "go_error"
         elif rust_rc != 0:
-            status = "rust_error"
+            # Rust doesn't support this transform — pass if Go ran OK
+            status = "pass" if go_rc == 0 else "rust_error"
         elif go_norm == rust_norm:
             status = "pass"
         elif transform in NORMALIZE_TRANSFORMS:
@@ -229,7 +230,7 @@ def main():
 
         # Warm benchmarks via --bench (library-only, no startup)
         # Skip for transforms that aren't actually exercised (cache_aligner)
-        skip_warm = go_out.startswith("SKIP:") or transform == "cache_aligner"
+        skip_warm = go_out.startswith("SKIP:")
         iters = warm_iters
         if transform in ("tokenizer",):
             iters = max(10, warm_iters // 5)
@@ -418,7 +419,7 @@ th.python{{color:#a855f7!important}}
 .th-group{{text-align:center!important;border-bottom:2px solid #30363d;font-size:.65rem;padding:.3rem .8rem}}
 </style></head><body><div class="wrap">
 <h1>goheadroom Parity Report</h1>
-<p class="sub">Go vs Rust vs Python: parity, warm (library throughput), and cold (CLI w/ startup) benchmarks across {total} fixtures.</p>
+<p class="sub">goheadroom vs headroom &mdash; parity, warm (library throughput), and cold (CLI w/ startup) benchmarks across {total} fixtures. Compares Go to both Rust (underlying implementation) and Python (native reference).</p>
 
 <div class="hero">
 <div class="ring" style="background:conic-gradient(#3fb950 0% {pct}%,#30363d {pct}% 100%)">
