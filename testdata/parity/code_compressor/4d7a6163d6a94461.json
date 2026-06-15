@@ -1,0 +1,11 @@
+{
+  "transform": "code_compressor",
+  "config": {},
+  "input": "class MyClass:\n    def __init__(self):\n        self.x = 1\n        self.y = 2\n",
+  "output": {
+    "compressed": "class MyClass:\n    def __init__(self):\n        self.x = 1\n        self.y = 2\n",
+    "language": "unknown"
+  },
+  "input_sha256": "4d7a6163d6a94461",
+  "recorded_at": "2026-06-15T20:46:43.339422+00:00"
+}

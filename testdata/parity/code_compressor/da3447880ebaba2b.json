@@ -1,0 +1,11 @@
+{
+  "transform": "code_compressor",
+  "config": {},
+  "input": "def hello(name: str) -> str:\n    message = f'Hello, {name}!'\n    return message\n",
+  "output": {
+    "compressed": "def hello(name: str) -> str:\n    message = f'Hello, {name}!'\n    return message\n",
+    "language": "unknown"
+  },
+  "input_sha256": "da3447880ebaba2b",
+  "recorded_at": "2026-06-15T20:46:43.339401+00:00"
+}

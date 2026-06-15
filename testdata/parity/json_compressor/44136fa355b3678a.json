@@ -1,0 +1,16 @@
+{
+  "transform": "json_compressor",
+  "config": {
+    "short_value_threshold": 20,
+    "entropy_threshold": 0.85,
+    "max_array_items_full": 3,
+    "max_number_digits": 10
+  },
+  "input": "{}",
+  "output": {
+    "compressed": "{}",
+    "preservation_ratio": 1.0
+  },
+  "input_sha256": "44136fa355b3678a",
+  "recorded_at": "2026-06-15T20:46:43.336811+00:00"
+}

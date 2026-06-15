@@ -1,0 +1,11 @@
+{
+  "transform": "code_compressor",
+  "config": {},
+  "input": "import os\n\ndef foo():\n    pass\n\ndef bar(x):\n    return x * 2\n",
+  "output": {
+    "compressed": "import os\n\ndef foo():\n    pass\n\ndef bar(x):\n    return x * 2\n",
+    "language": "unknown"
+  },
+  "input_sha256": "77bbec9d2ab5abfe",
+  "recorded_at": "2026-06-15T20:46:43.339477+00:00"
+}

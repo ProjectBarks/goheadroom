@@ -1,0 +1,11 @@
+{
+  "transform": "code_compressor",
+  "config": {},
+  "input": "plain text without any code indicators\n",
+  "output": {
+    "compressed": "plain text without any code indicators\n",
+    "language": "unknown"
+  },
+  "input_sha256": "b2ee14b39a2cef74",
+  "recorded_at": "2026-06-15T20:46:43.339492+00:00"
+}

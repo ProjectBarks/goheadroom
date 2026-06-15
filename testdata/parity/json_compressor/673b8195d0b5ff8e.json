@@ -1,0 +1,16 @@
+{
+  "transform": "json_compressor",
+  "config": {
+    "short_value_threshold": 20,
+    "entropy_threshold": 0.85,
+    "max_array_items_full": 3,
+    "max_number_digits": 10
+  },
+  "input": "[{\"id\": 1, \"val\": \"a\"}, {\"id\": 2, \"val\": \"b\"}, {\"id\": 3, \"val\": \"c\"}, {\"id\": 4, \"val\": \"d\"}]",
+  "output": {
+    "compressed": "[{\"id\":1,\"val\":\"a\"},{\"id\":2,\"val\":\"b\"},{\"id\":3,\"val\":\"c\"},{\"id\":4,\"val\":}]",
+    "preservation_ratio": 0.8043
+  },
+  "input_sha256": "673b8195d0b5ff8e",
+  "recorded_at": "2026-06-15T20:46:43.336728+00:00"
+}

@@ -1,0 +1,11 @@
+{
+  "transform": "code_compressor",
+  "config": {},
+  "input": "import os\nimport sys\n\nx = 1\ny = 2\n",
+  "output": {
+    "compressed": "import os\nimport sys\n\nx = 1\ny = 2\n",
+    "language": "unknown"
+  },
+  "input_sha256": "1a5ddb0db8df3fee",
+  "recorded_at": "2026-06-15T20:46:43.339417+00:00"
+}

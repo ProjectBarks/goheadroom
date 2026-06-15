@@ -1,0 +1,11 @@
+{
+  "transform": "code_compressor",
+  "config": {},
+  "input": "#include <iostream>\n\nnamespace ns {\nclass Foo {\n  void bar() {\n    std::cout << 1;\n  }\n};\n}\n",
+  "output": {
+    "compressed": "#include <iostream>\n\nnamespace ns {\nclass Foo {\n  void bar() {\n    std::cout << 1;\n  }\n};\n}\n",
+    "language": "unknown"
+  },
+  "input_sha256": "39b526dbe7baf3be",
+  "recorded_at": "2026-06-15T20:46:43.339484+00:00"
+}

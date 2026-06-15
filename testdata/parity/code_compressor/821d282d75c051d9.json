@@ -1,0 +1,11 @@
+{
+  "transform": "code_compressor",
+  "config": {},
+  "input": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+  "output": {
+    "compressed": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+    "language": "unknown"
+  },
+  "input_sha256": "821d282d75c051d9",
+  "recorded_at": "2026-06-15T20:46:43.339458+00:00"
+}

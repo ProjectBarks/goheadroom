@@ -1,0 +1,16 @@
+{
+  "transform": "json_compressor",
+  "config": {
+    "short_value_threshold": 20,
+    "entropy_threshold": 0.85,
+    "max_array_items_full": 3,
+    "max_number_digits": 10
+  },
+  "input": "{\"name\": \"Alice\", \"age\": 30}",
+  "output": {
+    "compressed": "{\"name\":\"Alice\",\"age\":30}",
+    "preservation_ratio": 0.8929
+  },
+  "input_sha256": "b57221de4a5aabb5",
+  "recorded_at": "2026-06-15T20:46:43.335711+00:00"
+}

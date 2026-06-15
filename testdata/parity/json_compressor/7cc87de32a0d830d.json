@@ -1,0 +1,16 @@
+{
+  "transform": "json_compressor",
+  "config": {
+    "short_value_threshold": 20,
+    "entropy_threshold": 0.85,
+    "max_array_items_full": 3,
+    "max_number_digits": 10
+  },
+  "input": "{\"id\": \"550e8400-e29b-41d4-a716-446655440000\", \"name\": \"Bob\"}",
+  "output": {
+    "compressed": "{\"id\":\"550e8400-e29b-41d4-a716-446655440000\",\"name\":\"Bob\"}",
+    "preservation_ratio": 0.9508
+  },
+  "input_sha256": "7cc87de32a0d830d",
+  "recorded_at": "2026-06-15T20:46:43.336438+00:00"
+}
