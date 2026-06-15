@@ -3,8 +3,8 @@
   "config": {},
   "input": "import os\n\ndef foo():\n    pass\n\ndef bar(x):\n    return x * 2\n",
   "output": {
-    "compressed": "import os\n\ndef foo():\n    pass\n\ndef bar(x):\n    return x * 2\n",
-    "language": "unknown"
+    "compressed": "import os\n\ndef foo():\n\n    # [1 lines omitted]\n    pass\n\ndef bar(x):\n\n    # [1 lines omitted]\n    pass\n",
+    "language": "Python"
   },
   "input_sha256": "77bbec9d2ab5abfe",
   "recorded_at": "2026-06-15T20:46:43.339477+00:00"

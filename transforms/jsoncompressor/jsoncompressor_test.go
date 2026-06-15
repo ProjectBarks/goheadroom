@@ -32,8 +32,8 @@ func TestElongatedStringReplaced(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.ShortValueThreshold = 5
 	result := Compress(`{"description": "This is a very long description that goes on and on"}`, cfg)
-	assert.Contains(t, result.Compressed, `"..."`)
 	assert.NotContains(t, result.Compressed, "very long description")
+	assert.Contains(t, result.Compressed, `"description"`)
 }
 
 func TestHighEntropyPreserved(t *testing.T) {
@@ -43,7 +43,8 @@ func TestHighEntropyPreserved(t *testing.T) {
 
 func TestLowEntropyLongStringReplaced(t *testing.T) {
 	result := Compress(`{"data": "`+strings.Repeat("a", 80)+`"}`, DefaultConfig())
-	assert.Contains(t, result.Compressed, `"..."`)
+	assert.NotContains(t, result.Compressed, strings.Repeat("a", 80))
+	assert.Contains(t, result.Compressed, `"data"`)
 }
 
 func TestArrayItemsAfterMaxFullReplaced(t *testing.T) {
@@ -52,7 +53,7 @@ func TestArrayItemsAfterMaxFullReplaced(t *testing.T) {
 	result := Compress(`["short", "also short", "third item here now", "fourth item"]`, cfg)
 	assert.Contains(t, result.Compressed, `"short"`)
 	assert.Contains(t, result.Compressed, `"also short"`)
-	assert.Contains(t, result.Compressed, `"..."`)
+	assert.NotContains(t, result.Compressed, "third item")
 }
 
 func TestEmptyObject(t *testing.T) {
@@ -66,7 +67,7 @@ func TestNestedObject(t *testing.T) {
 	assert.Contains(t, result.Compressed, `"user"`)
 	assert.Contains(t, result.Compressed, `"name"`)
 	assert.Contains(t, result.Compressed, `"Bob"`)
-	assert.Contains(t, result.Compressed, `"..."`)
+	assert.NotContains(t, result.Compressed, strings.Repeat("x", 100))
 }
 
 func TestShortValueThresholdAppliedToPayload(t *testing.T) {
@@ -74,7 +75,7 @@ func TestShortValueThresholdAppliedToPayload(t *testing.T) {
 	cfg.ShortValueThreshold = 4
 	result := Compress(`{"a": "abcd", "b": "abcde"}`, cfg)
 	assert.Contains(t, result.Compressed, `"abcd"`)
-	assert.Contains(t, result.Compressed, `"..."`)
+	assert.NotContains(t, result.Compressed, `"abcde"`)
 }
 
 func TestNormalizedEntropy(t *testing.T) {

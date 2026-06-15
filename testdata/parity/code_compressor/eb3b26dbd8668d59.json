@@ -4,7 +4,7 @@
   "input": "interface Shape {\n  area(): number;\n}\n",
   "output": {
     "compressed": "interface Shape {\n  area(): number;\n}\n",
-    "language": "unknown"
+    "language": "TypeScript"
   },
   "input_sha256": "eb3b26dbd8668d59",
   "recorded_at": "2026-06-15T20:46:43.339474+00:00"

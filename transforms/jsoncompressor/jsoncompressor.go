@@ -93,7 +93,6 @@ func Compress(content string, cfg Config) Result {
 				arrayIdx = arrayItemStack[len(arrayItemStack)-1]
 			}
 			if inArray && arrayIdx >= cfg.MaxArrayItemsFull {
-				sb.WriteString(`"..."`)
 				continue
 			}
 			value := tok.text
@@ -112,7 +111,7 @@ func Compress(content string, cfg Config) Result {
 					continue
 				}
 			}
-			sb.WriteString(`"..."`)
+			// Elide: emit nothing (matches Python mask-based behavior)
 		case tokNumber:
 			if len(tok.text) <= cfg.MaxNumberDigits {
 				sb.WriteString(tok.text)
@@ -120,7 +119,9 @@ func Compress(content string, cfg Config) Result {
 				sb.WriteString("0")
 			}
 		default:
-			sb.WriteString(tok.text)
+			if tok.typ != tokWhitespace {
+				sb.WriteString(tok.text)
+			}
 		}
 	}
 

@@ -3,8 +3,8 @@
   "config": {},
   "input": "function greet(name) {\n  const msg = `Hello ${name}`;\n  return msg;\n}\n",
   "output": {
-    "compressed": "function greet(name) {\n  const msg = `Hello ${name}`;\n  return msg;\n}\n",
-    "language": "unknown"
+    "compressed": "function greet(name) { // [3 lines omitted] }\n",
+    "language": "JavaScript"
   },
   "input_sha256": "b827bb6ed5f5f023",
   "recorded_at": "2026-06-15T20:46:43.339470+00:00"
