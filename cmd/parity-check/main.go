@@ -12,8 +12,10 @@ import (
 
 	"github.com/uber/goheadroom/ccr"
 	"github.com/uber/goheadroom/tokenizer"
+	"github.com/uber/goheadroom/transforms/codecompressor"
 	"github.com/uber/goheadroom/transforms/contentdetector"
 	"github.com/uber/goheadroom/transforms/diffcompressor"
+	"github.com/uber/goheadroom/transforms/jsoncompressor"
 	"github.com/uber/goheadroom/transforms/logcompressor"
 	"github.com/uber/goheadroom/transforms/smartcrusher"
 )
@@ -116,6 +118,10 @@ func processFixture(path string) Result {
 		result = runContentDetector(fix, result)
 	case "ccr":
 		result = runCCR(fix, result)
+	case "json_compressor":
+		result = runJSONCompressor(fix, result)
+	case "code_compressor":
+		result = runCodeCompressor(fix, result)
 	default:
 		result.Status = "skip"
 		result.Message = fmt.Sprintf("unsupported transform: %s", fix.Transform)
@@ -276,6 +282,50 @@ func runCCR(fix Fixture, r Result) Result {
 	} else {
 		r.Status = "fail"
 		r.Message = "CCR store round-trip failed"
+	}
+	return r
+}
+
+func runJSONCompressor(fix Fixture, r Result) Result {
+	var input string
+	json.Unmarshal(fix.Input, &input)
+	result := jsoncompressor.Compress(input, jsoncompressor.DefaultConfig())
+	r.GoOutput = result.Compressed
+	r.GoBytes = len(r.GoOutput)
+
+	var expected struct {
+		Compressed string `json:"compressed"`
+	}
+	json.Unmarshal(fix.Output, &expected)
+
+	if r.GoOutput == expected.Compressed {
+		r.Status = "pass"
+	} else {
+		r.Status = "fail"
+		r.Message = fmt.Sprintf("output mismatch: go=%d bytes, expected=%d bytes", len(r.GoOutput), len(expected.Compressed))
+	}
+	return r
+}
+
+func runCodeCompressor(fix Fixture, r Result) Result {
+	var input string
+	json.Unmarshal(fix.Input, &input)
+	result := codecompressor.Compress(input)
+	r.GoOutput = result.Compressed
+	r.GoBytes = len(r.GoOutput)
+
+	var expected struct {
+		Compressed string `json:"compressed"`
+		Language   string `json:"language"`
+	}
+	json.Unmarshal(fix.Output, &expected)
+
+	if result.Compressed == expected.Compressed && result.Language.String() == expected.Language {
+		r.Status = "pass"
+	} else {
+		r.Status = "fail"
+		r.Message = fmt.Sprintf("mismatch: lang go=%s expected=%s, bytes go=%d expected=%d",
+			result.Language.String(), expected.Language, len(result.Compressed), len(expected.Compressed))
 	}
 	return r
 }
