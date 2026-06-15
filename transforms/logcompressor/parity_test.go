@@ -37,8 +37,9 @@ type parityConfig struct {
 	KeepLastError      *bool `json:"keep_last_error,omitempty"`
 	KeepSummaryLines   *bool `json:"keep_summary_lines,omitempty"`
 	DedupeWarnings     *bool `json:"dedupe_warnings,omitempty"`
-	EnableCCR          *bool `json:"enable_ccr,omitempty"`
-	MinLinesForCCR     *int  `json:"min_lines_for_ccr,omitempty"`
+	EnableCCR                *bool    `json:"enable_ccr,omitempty"`
+	MinLinesForCCR           *int     `json:"min_lines_for_ccr,omitempty"`
+	MinCompressionRatioForCCR *float64 `json:"min_compression_ratio_for_ccr,omitempty"`
 }
 
 func configFromParity(raw json.RawMessage) LogCompressorConfig {
@@ -83,6 +84,9 @@ func configFromParity(raw json.RawMessage) LogCompressorConfig {
 	if pc.MinLinesForCCR != nil {
 		cfg.MinLinesForCCR = *pc.MinLinesForCCR
 	}
+	if pc.MinCompressionRatioForCCR != nil {
+		cfg.MinCompressionRatioForCCR = *pc.MinCompressionRatioForCCR
+	}
 	return cfg
 }
 
@@ -119,6 +123,13 @@ func TestLogCompressorParity(t *testing.T) {
 			if fixture.Output.FormatDetected != "" {
 				assert.Equal(t, fixture.Output.FormatDetected, result.FormatDetected.String(),
 					"format_detected mismatch for %s", entry.Name())
+			}
+			if fixture.Output.CacheKey == nil {
+				assert.Nil(t, result.CacheKey, "cache_key should be nil for %s", entry.Name())
+			} else {
+				require.NotNil(t, result.CacheKey, "cache_key should not be nil for %s", entry.Name())
+				assert.Equal(t, *fixture.Output.CacheKey, *result.CacheKey,
+					"cache_key mismatch for %s", entry.Name())
 			}
 		})
 	}
