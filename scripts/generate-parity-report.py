@@ -297,6 +297,7 @@ def generate_html(results, out_path):
     failed = sum(1 for r in results if r["status"] == "fail")
     skipped = sum(1 for r in results if r["status"] in ("both_skip", "go_error", "rust_error"))
     pct = (passed / total * 100) if total else 0
+    NCOLS = 14
 
     cats = defaultdict(list)
     for r in results:
@@ -330,11 +331,13 @@ def generate_html(results, out_path):
             f'<td><strong>{escape(cat)}</strong></td>'
             f'<td class="mono r">{parity_badge}</td>'
             f'<td class="mono r go">{fmt_us(go_w_avg)}</td>'
+            f'<td class="mono r go">{go_c_avg:.1f}ms</td>'
+            f'<td class="mono r rust">{fmt_us(rust_w_avg)}</td>'
+            f'<td class="mono r rust">{rust_c_avg:.1f}ms</td>'
+            f'<td class="mono r python">{fmt_us(python_w_avg)}</td>'
+            f'<td class="mono r python">{python_c_avg:.1f}ms</td>'
             f'<td class="mono r">{fmt_ratio(go_w_avg, rust_w_avg)}</td>'
             f'<td class="mono r">{fmt_ratio(go_w_avg, python_w_avg)}</td>'
-            f'<td class="mono r go">{go_c_avg:.1f}ms</td>'
-            f'<td class="mono r rust">{rust_c_avg:.1f}ms</td>'
-            f'<td class="mono r python">{python_c_avg:.1f}ms</td>'
             f'</tr>'
         )
 
@@ -344,7 +347,7 @@ def generate_html(results, out_path):
         cat_pass = sum(1 for e in entries if e["status"] == "pass")
         cat_total = len(entries)
         cat_color = "#3fb950" if cat_pass == cat_total else "#f85149"
-        rows.append(f'''<tr class="cat-row"><td colspan="9"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
+        rows.append(f'''<tr class="cat-row"><td colspan="{NCOLS}"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
 
         for e in sorted(entries, key=lambda x: x["fixture"]):
             s = e["status"]
@@ -359,11 +362,15 @@ def generate_html(results, out_path):
             rows.append(f'''<tr class="fix-row toggle" data-status="{s}" onclick="toggleDetail('{detail_id}')">
 <td><span style="color:{color}">{icon}</span></td>
 <td class="mono fname">{escape(e["fixture"][:40])}</td>
-<td>{escape(e["transform"])}</td>
-<td class="mono r">{e["go_bytes"]}</td>
-<td class="mono r">{e["rust_bytes"]}</td>
-<td class="mono r">{e["python_bytes"]}</td>
-<td class="mono r go">{fmt_us(e["go_warm_us"])}</td>
+<td class="ghcol mono r">{e["go_bytes"]}</td>
+<td class="ghcol mono r go">{fmt_us(e["go_warm_us"])}</td>
+<td class="ghcol mono r go">{e["go_ms"]:.1f}ms</td>
+<td class="hrcol mono r">{e["rust_bytes"]}</td>
+<td class="hrcol mono r rust">{fmt_us(e["rust_warm_us"])}</td>
+<td class="hrcol mono r rust">{e["rust_ms"]:.1f}ms</td>
+<td class="hrcol mono r">{e["python_bytes"]}</td>
+<td class="hrcol mono r python">{fmt_us(e["python_warm_us"])}</td>
+<td class="hrcol mono r python">{e["python_ms"]:.1f}ms</td>
 <td class="mono r">{vs_rust}</td>
 <td class="mono r">{vs_python}</td>
 </tr>''')
@@ -380,7 +387,7 @@ def generate_html(results, out_path):
                 f' &middot; <span class="python">Python {e["python_ms"]:.1f}ms</span>'
             )
 
-            rows.append(f'''<tr class="detail-row hidden" id="detail_{detail_id}"><td colspan="9">
+            rows.append(f'''<tr class="detail-row hidden" id="detail_{detail_id}"><td colspan="{NCOLS}">
 <div class="detail-box">
 <div class="detail-meta">Cold startup: {cold_info}</div>
 <div class="detail-grid">
@@ -410,7 +417,7 @@ def generate_html(results, out_path):
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d9}}
-.wrap{{max-width:1400px;margin:0 auto;padding:2rem}}
+.wrap{{max-width:1600px;margin:0 auto;padding:2rem}}
 h1{{font-size:2rem;color:#f0f6fc;margin-bottom:.3rem}}
 h2{{font-size:1.2rem;color:#f0f6fc;margin:1.5rem 0 .8rem}}
 .sub{{color:#8b949e;margin-bottom:1.5rem}}
@@ -427,13 +434,13 @@ h2{{font-size:1.2rem;color:#f0f6fc;margin:1.5rem 0 .8rem}}
 .fbtn{{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:.4rem 1rem;border-radius:6px;cursor:pointer;font-size:.85rem}}
 .fbtn.on{{background:#388bfd20;border-color:#388bfd;color:#58a6ff}}
 table{{width:100%;border-collapse:collapse}}
-th{{background:#161b22;padding:.6rem .8rem;text-align:left;font-size:.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:2}}
+th{{background:#161b22;padding:.5rem .6rem;text-align:left;font-size:.65rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:2}}
 th.r{{text-align:right}}
-td{{padding:.4rem .8rem;border-bottom:1px solid #21262d;font-size:.82rem}}
+td{{padding:.35rem .6rem;border-bottom:1px solid #21262d;font-size:.78rem}}
 td.r{{text-align:right}}
-.mono{{font-family:'SF Mono','Fira Code',monospace;font-size:.75rem}}
-.fname{{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-.cat-row td{{background:#161b22;padding:.5rem .8rem;border-bottom:1px solid #30363d}}
+.mono{{font-family:'SF Mono','Fira Code',monospace;font-size:.72rem}}
+.fname{{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.cat-row td{{background:#161b22;padding:.5rem .6rem;border-bottom:1px solid #30363d}}
 .toggle{{cursor:pointer}}.toggle:hover td{{background:#161b2280}}
 .hidden{{display:none}}
 tr.fhide{{display:none}}
@@ -444,8 +451,15 @@ th.go{{color:#00add8!important}}
 th.rust{{color:#f97316!important}}
 th.python{{color:#a855f7!important}}
 .summary-table{{width:100%;margin-bottom:1.5rem}}
-.summary-table td,.summary-table th{{padding:.5rem 1rem}}
-.th-group{{text-align:center!important;border-bottom:2px solid #30363d;font-size:.65rem;padding:.3rem .8rem}}
+.summary-table td,.summary-table th{{padding:.5rem .8rem}}
+.th-group{{text-align:center!important;font-size:.7rem;padding:.4rem .6rem;font-weight:700}}
+.th-group-gh{{border-bottom:3px solid #00add8;color:#00add8}}
+.th-group-hr{{border-bottom:3px solid #f97316;color:#f0a870}}
+.th-sub{{text-align:center!important;font-size:.6rem;padding:.2rem .6rem;font-weight:600}}
+.th-sub-rust{{border-bottom:2px solid #f9731640;color:#f97316}}
+.th-sub-python{{border-bottom:2px solid #a855f740;color:#a855f7}}
+.ghcol{{background:#00add80a}}
+.hrcol{{background:#f9731606}}
 .detail-row td{{padding:0;border-bottom:1px solid #30363d}}
 .detail-box{{background:#0d1117;border:1px solid #30363d;border-radius:6px;margin:.2rem .5rem .6rem;padding:1rem}}
 .detail-meta{{font-size:.75rem;color:#8b949e;margin-bottom:.8rem}}
@@ -476,12 +490,21 @@ Compares Go to Rust (underlying implementation) and Python (native reference).</
 <tr>
 <th rowspan="2">Transform</th>
 <th rowspan="2" class="r">Parity</th>
-<th colspan="3" class="th-group" style="color:#58a6ff">Warm (library call)</th>
-<th colspan="3" class="th-group" style="color:#f97316">Cold (CLI startup)</th>
+<th colspan="2" class="th-group th-group-gh">goheadroom</th>
+<th colspan="4" class="th-group th-group-hr">headroom</th>
+<th colspan="2" rowspan="2" style="text-align:center;font-size:.65rem;border-bottom:1px solid #30363d">Comparison</th>
 </tr>
 <tr>
-<th class="r go">goheadroom</th><th class="r">vs Rust</th><th class="r">vs Python</th>
-<th class="r go">Go</th><th class="r rust">Rust</th><th class="r python">Python</th>
+<th class="r go" style="font-size:.6rem">Warm</th><th class="r go" style="font-size:.6rem">Cold</th>
+<th class="r rust th-sub th-sub-rust" colspan="2">Rust</th>
+<th class="r python th-sub th-sub-python" colspan="2">Python</th>
+</tr>
+<tr style="font-size:.55rem">
+<th></th><th></th>
+<th class="r go"></th><th class="r go"></th>
+<th class="r rust">Warm</th><th class="r rust">Cold</th>
+<th class="r python">Warm</th><th class="r python">Cold</th>
+<th class="r">vs Rust</th><th class="r">vs Python</th>
 </tr>
 </thead><tbody>
 {"".join(summary_rows)}
@@ -499,9 +522,16 @@ Compares Go to Rust (underlying implementation) and Python (native reference).</
 
 <table><thead>
 <tr>
-<th></th><th>Fixture</th><th>Transform</th>
-<th class="r">Go B</th><th class="r">Rust B</th><th class="r">Py B</th>
-<th class="r go">goheadroom</th><th class="r">vs Rust</th><th class="r">vs Python</th>
+<th rowspan="2"></th><th rowspan="2">Fixture</th>
+<th colspan="3" class="th-group th-group-gh">goheadroom</th>
+<th colspan="6" class="th-group th-group-hr">headroom</th>
+<th colspan="2" rowspan="2" style="text-align:center;font-size:.65rem;border-bottom:1px solid #30363d">Comparison</th>
+</tr>
+<tr>
+<th class="r go" style="font-size:.6rem">Bytes</th><th class="r go" style="font-size:.6rem">Warm</th><th class="r go" style="font-size:.6rem">Cold</th>
+<th class="r rust th-sub th-sub-rust">Bytes</th><th class="r rust th-sub th-sub-rust">Warm</th><th class="r rust th-sub th-sub-rust">Cold</th>
+<th class="r python th-sub th-sub-python">Bytes</th><th class="r python th-sub th-sub-python">Warm</th><th class="r python th-sub th-sub-python">Cold</th>
+<th class="r" style="font-size:.6rem">vs Rust</th><th class="r" style="font-size:.6rem">vs Python</th>
 </tr></thead><tbody>
 {"".join(rows)}
 </tbody></table>
