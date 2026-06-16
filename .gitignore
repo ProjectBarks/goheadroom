@@ -8,11 +8,14 @@ goheadroom.test
 # C library
 libtokenizers.a
 
+# Binaries
+parity-check
+
 # Generated reports
 logs/
+docs/superpowers
 parity-report.html
 optimization-story.html
-PROXY_ANALYSIS.md
 
 # Python
 __pycache__/
