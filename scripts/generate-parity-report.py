@@ -191,6 +191,13 @@ def main():
         transform = fix.get("transform", "unknown")
         category = fpath.parent.name
 
+        # Store fixture input for the expandable detail view
+        raw_input = fix.get("input", "")
+        if isinstance(raw_input, str):
+            fixture_input = raw_input[:3000]
+        else:
+            fixture_input = json.dumps(raw_input, indent=2)[:3000]
+
         go_out, go_rc, go_ms = run_timed(go_bin, str(fpath), cold_runs)
 
         rust_out, rust_rc, rust_ms = "", 1, 0
@@ -245,6 +252,7 @@ def main():
             "category": category,
             "transform": transform,
             "status": status,
+            "fixture_input": fixture_input,
             "go_ms": round(go_ms, 2),
             "rust_ms": round(rust_ms, 2),
             "python_ms": round(python_ms, 2) if python_ms else 0,
@@ -271,6 +279,18 @@ def fmt_us(us):
         return f"{us/1000:.1f}ms"
     return f"{us:.0f}us"
 
+def fmt_ratio(go_val, other_val, unit=""):
+    """Format a ratio as 'Nx faster/slower' with color."""
+    if go_val <= 0 or other_val <= 0:
+        return '<span style="color:#8b949e">-</span>'
+    ratio = other_val / go_val
+    if ratio >= 1.0:
+        color = "#3fb950"
+        return f'<span style="color:{color}">{ratio:.1f}x faster</span>'
+    else:
+        color = "#f85149"
+        return f'<span style="color:{color}">{1/ratio:.1f}x slower</span>'
+
 def generate_html(results, out_path):
     total = len(results)
     passed = sum(1 for r in results if r["status"] == "pass")
@@ -282,26 +302,23 @@ def generate_html(results, out_path):
     for r in results:
         cats[r["category"]].append(r)
 
-    # Per-category summary with warm + cold
+    # Per-category summary
     summary_rows = []
     for cat in sorted(cats):
         entries = cats[cat]
         go_warm = [e["go_warm_us"] for e in entries if e["go_warm_us"] > 0]
         rust_warm = [e["rust_warm_us"] for e in entries if e["rust_warm_us"] > 0]
         python_warm = [e["python_warm_us"] for e in entries if e["python_warm_us"] > 0]
-        go_cold = [e["go_ms"] for e in entries if e["go_ms"] > 0]
-        rust_cold = [e["rust_ms"] for e in entries if e["rust_ms"] > 0]
 
         go_w_avg = sum(go_warm) / len(go_warm) if go_warm else 0
         rust_w_avg = sum(rust_warm) / len(rust_warm) if rust_warm else 0
         python_w_avg = sum(python_warm) / len(python_warm) if python_warm else 0
-        warm_ratio = f"{go_w_avg / rust_w_avg:.2f}x" if rust_w_avg > 0 and go_w_avg > 0 else "-"
 
+        go_cold = [e["go_ms"] for e in entries if e["go_ms"] > 0]
+        rust_cold = [e["rust_ms"] for e in entries if e["rust_ms"] > 0]
+        python_cold = [e["python_ms"] for e in entries if e["python_ms"] > 0]
         go_c_avg = sum(go_cold) / len(go_cold) if go_cold else 0
         rust_c_avg = sum(rust_cold) / len(rust_cold) if rust_cold else 0
-        cold_ratio = f"{go_c_avg / rust_c_avg:.2f}x" if rust_c_avg > 0 and go_c_avg > 0 else "-"
-
-        python_cold = [e["python_ms"] for e in entries if e["python_ms"] > 0]
         python_c_avg = sum(python_cold) / len(python_cold) if python_cold else 0
 
         n_pass = sum(1 for e in entries if e["status"] == "pass")
@@ -313,13 +330,11 @@ def generate_html(results, out_path):
             f'<td><strong>{escape(cat)}</strong></td>'
             f'<td class="mono r">{parity_badge}</td>'
             f'<td class="mono r go">{fmt_us(go_w_avg)}</td>'
-            f'<td class="mono r rust">{fmt_us(rust_w_avg)}</td>'
-            f'<td class="mono r python">{fmt_us(python_w_avg)}</td>'
-            f'<td class="mono r">{warm_ratio}</td>'
+            f'<td class="mono r">{fmt_ratio(go_w_avg, rust_w_avg)}</td>'
+            f'<td class="mono r">{fmt_ratio(go_w_avg, python_w_avg)}</td>'
             f'<td class="mono r go">{go_c_avg:.1f}ms</td>'
             f'<td class="mono r rust">{rust_c_avg:.1f}ms</td>'
             f'<td class="mono r python">{python_c_avg:.1f}ms</td>'
-            f'<td class="mono r">{cold_ratio}</td>'
             f'</tr>'
         )
 
@@ -329,28 +344,19 @@ def generate_html(results, out_path):
         cat_pass = sum(1 for e in entries if e["status"] == "pass")
         cat_total = len(entries)
         cat_color = "#3fb950" if cat_pass == cat_total else "#f85149"
-        rows.append(f'''<tr class="cat-row"><td colspan="15"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
+        rows.append(f'''<tr class="cat-row"><td colspan="9"><strong>{escape(cat)}</strong> <span style="color:{cat_color};font-size:0.8rem">{cat_pass}/{cat_total} pass</span></td></tr>''')
 
         for e in sorted(entries, key=lambda x: x["fixture"]):
             s = e["status"]
             icon = {"pass": "&#10003;", "fail": "&#10007;", "both_skip": "&#8212;", "go_error": "&#9888;", "rust_error": "&#9888;"}.get(s, "?")
             color = {"pass": "#3fb950", "fail": "#f85149"}.get(s, "#8b949e")
 
-            warm_ratio = ""
-            if e["go_warm_us"] > 0 and e["rust_warm_us"] > 0:
-                r = e["go_warm_us"] / e["rust_warm_us"]
-                warm_ratio = f"{r:.2f}x"
-
-            cli_ratio = ""
-            if e["go_ms"] > 0 and e["rust_ms"] > 0:
-                r = e["go_ms"] / e["rust_ms"]
-                cli_ratio = f"{r:.1f}x"
+            vs_rust = fmt_ratio(e["go_warm_us"], e["rust_warm_us"])
+            vs_python = fmt_ratio(e["go_warm_us"], e["python_warm_us"])
 
             detail_id = e["fixture"].replace(".", "_")
-            has_diff = "fail" == s and e["diff_html"]
-            toggle = f' class="toggle" onclick="toggleDiff(\'{detail_id}\')"' if has_diff else ""
 
-            rows.append(f'''<tr class="fix-row" data-status="{s}"{toggle}>
+            rows.append(f'''<tr class="fix-row toggle" data-status="{s}" onclick="toggleDetail('{detail_id}')">
 <td><span style="color:{color}">{icon}</span></td>
 <td class="mono fname">{escape(e["fixture"][:40])}</td>
 <td>{escape(e["transform"])}</td>
@@ -358,16 +364,45 @@ def generate_html(results, out_path):
 <td class="mono r">{e["rust_bytes"]}</td>
 <td class="mono r">{e["python_bytes"]}</td>
 <td class="mono r go">{fmt_us(e["go_warm_us"])}</td>
-<td class="mono r rust">{fmt_us(e["rust_warm_us"])}</td>
-<td class="mono r python">{fmt_us(e["python_warm_us"])}</td>
-<td class="mono r">{warm_ratio}</td>
-<td class="mono r go">{e["go_ms"]:.1f}</td>
-<td class="mono r rust">{e["rust_ms"]:.1f}</td>
-<td class="mono r python">{e["python_ms"]:.1f}</td>
-<td class="mono r">{cli_ratio}</td>
+<td class="mono r">{vs_rust}</td>
+<td class="mono r">{vs_python}</td>
 </tr>''')
-            if has_diff:
-                rows.append(f'''<tr class="diff-row hidden" id="diff_{detail_id}"><td colspan="15"><div class="diff-box"><pre>{e["diff_html"]}</pre></div></td></tr>''')
+
+            # Expandable detail row with input + outputs
+            inp_html = escape(e.get("fixture_input", "")[:2000])
+            go_html = escape(e.get("go_out", "")[:2000])
+            rust_html = escape(e.get("rust_out", "")[:2000])
+            python_html = escape(e.get("python_out", "")[:2000])
+
+            cold_info = (
+                f'<span class="go">Go {e["go_ms"]:.1f}ms</span>'
+                f' &middot; <span class="rust">Rust {e["rust_ms"]:.1f}ms</span>'
+                f' &middot; <span class="python">Python {e["python_ms"]:.1f}ms</span>'
+            )
+
+            rows.append(f'''<tr class="detail-row hidden" id="detail_{detail_id}"><td colspan="9">
+<div class="detail-box">
+<div class="detail-meta">Cold startup: {cold_info}</div>
+<div class="detail-grid">
+<div class="detail-panel">
+<div class="detail-label">Input</div>
+<pre class="detail-pre">{inp_html}</pre>
+</div>
+<div class="detail-panel go-panel">
+<div class="detail-label go">goheadroom output <span class="detail-bytes">{e["go_bytes"]} bytes</span></div>
+<pre class="detail-pre">{go_html}</pre>
+</div>
+<div class="detail-panel rust-panel">
+<div class="detail-label rust">Rust output <span class="detail-bytes">{e["rust_bytes"]} bytes</span></div>
+<pre class="detail-pre">{rust_html}</pre>
+</div>
+<div class="detail-panel python-panel">
+<div class="detail-label python">Python output <span class="detail-bytes">{e["python_bytes"]} bytes</span></div>
+<pre class="detail-pre">{python_html}</pre>
+</div>
+</div>
+</div>
+</td></tr>''')
 
     html = f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -375,7 +410,7 @@ def generate_html(results, out_path):
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d9}}
-.wrap{{max-width:1600px;margin:0 auto;padding:2rem}}
+.wrap{{max-width:1400px;margin:0 auto;padding:2rem}}
 h1{{font-size:2rem;color:#f0f6fc;margin-bottom:.3rem}}
 h2{{font-size:1.2rem;color:#f0f6fc;margin:1.5rem 0 .8rem}}
 .sub{{color:#8b949e;margin-bottom:1.5rem}}
@@ -392,34 +427,39 @@ h2{{font-size:1.2rem;color:#f0f6fc;margin:1.5rem 0 .8rem}}
 .fbtn{{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:.4rem 1rem;border-radius:6px;cursor:pointer;font-size:.85rem}}
 .fbtn.on{{background:#388bfd20;border-color:#388bfd;color:#58a6ff}}
 table{{width:100%;border-collapse:collapse}}
-th{{background:#161b22;padding:.6rem .8rem;text-align:left;font-size:.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:1}}
+th{{background:#161b22;padding:.6rem .8rem;text-align:left;font-size:.7rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:2}}
 th.r{{text-align:right}}
 td{{padding:.4rem .8rem;border-bottom:1px solid #21262d;font-size:.82rem}}
 td.r{{text-align:right}}
 .mono{{font-family:'SF Mono','Fira Code',monospace;font-size:.75rem}}
 .fname{{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .cat-row td{{background:#161b22;padding:.5rem .8rem;border-bottom:1px solid #30363d}}
-.toggle{{cursor:pointer}}.toggle:hover td{{background:#21262d}}
-.diff-row td{{padding:0}}.diff-box{{background:#161b22;padding:.8rem;max-height:300px;overflow:auto}}
-.diff-box pre{{font-family:'SF Mono',monospace;font-size:.75rem;white-space:pre-wrap;line-height:1.5}}
-.diff-add{{color:#3fb950;display:block}}.diff-del{{color:#f85149;display:block}}.diff-hunk{{color:#8b949e;display:block}}
+.toggle{{cursor:pointer}}.toggle:hover td{{background:#161b2280}}
 .hidden{{display:none}}
 tr.fhide{{display:none}}
-td.go{{color:#8db9e8}}
-td.rust{{color:#f0a870}}
-td.python{{color:#c0a0e0}}
+td.go,.go{{color:#8db9e8}}
+td.rust,.rust{{color:#f0a870}}
+td.python,.python{{color:#c0a0e0}}
 th.go{{color:#00add8!important}}
 th.rust{{color:#f97316!important}}
 th.python{{color:#a855f7!important}}
 .summary-table{{width:100%;margin-bottom:1.5rem}}
 .summary-table td,.summary-table th{{padding:.5rem 1rem}}
-.summary-table td.go{{color:#8db9e8}}
-.summary-table td.rust{{color:#f0a870}}
-.summary-table td.python{{color:#c0a0e0}}
 .th-group{{text-align:center!important;border-bottom:2px solid #30363d;font-size:.65rem;padding:.3rem .8rem}}
+.detail-row td{{padding:0;border-bottom:1px solid #30363d}}
+.detail-box{{background:#0d1117;border:1px solid #30363d;border-radius:6px;margin:.2rem .5rem .6rem;padding:1rem}}
+.detail-meta{{font-size:.75rem;color:#8b949e;margin-bottom:.8rem}}
+.detail-grid{{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:.6rem}}
+.detail-panel{{background:#161b22;border:1px solid #21262d;border-radius:4px;overflow:hidden}}
+.detail-label{{font-size:.7rem;font-weight:600;padding:.4rem .6rem;background:#21262d;border-bottom:1px solid #30363d;color:#8b949e}}
+.detail-label.go{{color:#00add8}}.detail-label.rust{{color:#f97316}}.detail-label.python{{color:#a855f7}}
+.detail-bytes{{font-weight:400;opacity:.7;margin-left:.5rem}}
+.detail-pre{{font-family:'SF Mono','Fira Code',monospace;font-size:.7rem;padding:.5rem .6rem;max-height:250px;overflow:auto;white-space:pre-wrap;word-break:break-all;line-height:1.4;color:#c9d1d9;margin:0}}
+@media(max-width:1000px){{.detail-grid{{grid-template-columns:1fr}}}}
 </style></head><body><div class="wrap">
 <h1>goheadroom Parity Report</h1>
-<p class="sub">goheadroom vs headroom &mdash; parity, warm (library throughput), and cold (CLI w/ startup) benchmarks across {total} fixtures. Compares Go to both Rust (underlying implementation) and Python (native reference).</p>
+<p class="sub">goheadroom vs headroom &mdash; parity and benchmark comparison across {total} fixtures.<br>
+Compares Go to Rust (underlying implementation) and Python (native reference).</p>
 
 <div class="hero">
 <div class="ring" style="background:conic-gradient(#3fb950 0% {pct}%,#30363d {pct}% 100%)">
@@ -431,21 +471,24 @@ th.python{{color:#a855f7!important}}
 <div class="card"><div class="card-v" style="color:#f0f6fc">{total}</div><div class="card-l">Total</div></div>
 </div></div>
 
-<h2>Benchmark Summary</h2>
+<h2>Summary by Transform</h2>
 <table class="summary-table"><thead>
 <tr>
-<th rowspan="2">Category</th>
+<th rowspan="2">Transform</th>
 <th rowspan="2" class="r">Parity</th>
-<th colspan="4" class="th-group" style="color:#58a6ff">Warm (library, no startup)</th>
-<th colspan="4" class="th-group" style="color:#f97316">Cold (CLI, with startup)</th>
+<th colspan="3" class="th-group" style="color:#58a6ff">Warm (library call)</th>
+<th colspan="3" class="th-group" style="color:#f97316">Cold (CLI startup)</th>
 </tr>
 <tr>
-<th class="r go">Go</th><th class="r rust">Rust</th><th class="r python">Python</th><th class="r">Ratio</th>
-<th class="r go">Go</th><th class="r rust">Rust</th><th class="r python">Python</th><th class="r">Ratio</th>
+<th class="r go">goheadroom</th><th class="r">vs Rust</th><th class="r">vs Python</th>
+<th class="r go">Go</th><th class="r rust">Rust</th><th class="r python">Python</th>
 </tr>
 </thead><tbody>
 {"".join(summary_rows)}
 </tbody></table>
+
+<h2>Per-Fixture Results</h2>
+<p style="color:#8b949e;font-size:.8rem;margin-bottom:.8rem">Click any row to see input and output from all three implementations.</p>
 
 <div class="filters">
 <button class="fbtn on" onclick="filt('all',this)">All ({total})</button>
@@ -458,8 +501,7 @@ th.python{{color:#a855f7!important}}
 <tr>
 <th></th><th>Fixture</th><th>Transform</th>
 <th class="r">Go B</th><th class="r">Rust B</th><th class="r">Py B</th>
-<th class="r go">Go Warm</th><th class="r rust">Rust Warm</th><th class="r python">Py Warm</th><th class="r">Ratio</th>
-<th class="r go">Go CLI</th><th class="r rust">Rust CLI</th><th class="r python">Py CLI</th><th class="r">Ratio</th>
+<th class="r go">goheadroom</th><th class="r">vs Rust</th><th class="r">vs Python</th>
 </tr></thead><tbody>
 {"".join(rows)}
 </tbody></table>
@@ -471,8 +513,8 @@ if(f==='all')r.classList.remove('fhide');
 else if(f==='pass')r.classList.toggle('fhide',s!=='pass');
 else if(f==='fail')r.classList.toggle('fhide',s!=='fail');
 else if(f==='skip')r.classList.toggle('fhide',!['both_skip','go_error','rust_error'].includes(s));
-}});document.querySelectorAll('.diff-row').forEach(r=>r.classList.add('hidden'))}}
-function toggleDiff(id){{const r=document.getElementById('diff_'+id);if(r)r.classList.toggle('hidden')}}
+}});document.querySelectorAll('.detail-row').forEach(r=>r.classList.add('hidden'))}}
+function toggleDetail(id){{const r=document.getElementById('detail_'+id);if(r)r.classList.toggle('hidden')}}
 </script></body></html>'''
 
     with open(out_path, "w") as f:
