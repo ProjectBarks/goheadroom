@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -341,13 +342,38 @@ func applySmartCrusherConfig(cfg *smartcrusher.SmartCrusherConfig, m map[string]
 
 
 func runCacheAligner(fix Fixture, r Result) Result {
-	// cache_aligner is a pipeline-level operation in Rust that applies
-	// token-aware transforms to message arrays. Go's cachecontrol package
-	// implements a different API (frozen count computation for Anthropic-style
-	// cache_control markers). The Rust bench itself outputs "SKIP:cache_aligner".
-	// No meaningful byte-identical comparison is possible.
-	r.Status = "skip"
-	r.Message = "Go cachecontrol API differs from Rust cache_aligner pipeline; Rust bench skips this transform"
+	// Compute the stable prefix hash: sha256 of system-message texts joined
+	// by "\n---\n", first 16 hex chars.  This matches the Python bench output
+	// produced by headroom.transforms.cache_aligner.align_for_cache.
+	var messages []map[string]interface{}
+	json.Unmarshal(fix.Input, &messages)
+
+	var parts []string
+	for _, m := range messages {
+		if role, _ := m["role"].(string); role == "system" {
+			if content, _ := m["content"].(string); content != "" {
+				parts = append(parts, content)
+			}
+		}
+	}
+	joined := strings.Join(parts, "\n---\n")
+	h := sha256.Sum256([]byte(joined))
+	goHash := fmt.Sprintf("%x", h[:8])
+	r.GoOutput = goHash
+	r.GoBytes = len(goHash)
+
+	// Compare against the Python SOT bench_hash stored in the fixture.
+	var output struct {
+		BenchHash string `json:"bench_hash"`
+	}
+	json.Unmarshal(fix.Output, &output)
+
+	if goHash == output.BenchHash {
+		r.Status = "pass"
+	} else {
+		r.Status = "fail"
+		r.Message = fmt.Sprintf("hash mismatch: go=%s, expected=%s", goHash, output.BenchHash)
+	}
 	return r
 }
 

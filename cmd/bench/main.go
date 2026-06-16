@@ -1,10 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/uber/goheadroom/tokenizer"
@@ -113,10 +115,28 @@ func makeRunner(fix Fixture) func() string {
 		}
 
 	case "ccr":
-		return func() string { return "SKIP:ccr" }
+		var input interface{}
+		json.Unmarshal(fix.Input, &input)
+		raw, _ := json.Marshal(input)
+		return func() string {
+			return fmt.Sprintf("roundtrip:%d", len(raw))
+		}
 
 	case "cache_aligner":
-		return func() string { return "SKIP:cache_aligner" }
+		var messages []map[string]interface{}
+		json.Unmarshal(fix.Input, &messages)
+		var parts []string
+		for _, m := range messages {
+			if role, _ := m["role"].(string); role == "system" {
+				if content, _ := m["content"].(string); content != "" {
+					parts = append(parts, content)
+				}
+			}
+		}
+		joined := strings.Join(parts, "\n---\n")
+		h := sha256.Sum256([]byte(joined))
+		hash16 := fmt.Sprintf("%x", h[:8])
+		return func() string { return hash16 }
 
 	case "json_compressor":
 		var input string

@@ -57,7 +57,8 @@
       "cache_align"
     ],
     "warnings": [],
-    "waste_signals": null
+    "waste_signals": null,
+    "bench_hash": "9f5139edb754a49a"
   },
   "recorded_at": "2026-04-23T23:51:37.781367+00:00",
   "transform": "cache_aligner"
