@@ -217,19 +217,26 @@ def main():
 
         if not rust_bin:
             status = "pass" if go_rc == 0 else "go_error"
+            compared_to = "Go-only"
         elif go_rc != 0 and rust_rc != 0:
             status = "both_skip"
+            compared_to = "-"
         elif go_rc != 0:
             status = "go_error"
+            compared_to = "-"
         elif rust_rc != 0:
             # Rust doesn't support this transform — pass if Go ran OK
             status = "pass" if go_rc == 0 else "rust_error"
+            compared_to = "Go-only"
         elif go_norm == rust_norm:
             status = "pass"
+            compared_to = "Rust"
         elif transform in NORMALIZE_TRANSFORMS:
             status = "pass"
+            compared_to = "Rust (normalized)"
         else:
             status = "fail"
+            compared_to = "Rust"
 
         diff_html = ""
         if status == "fail":
@@ -252,6 +259,7 @@ def main():
             "category": category,
             "transform": transform,
             "status": status,
+            "compared_to": compared_to,
             "fixture_input": fixture_input,
             "go_ms": round(go_ms, 2),
             "rust_ms": round(rust_ms, 2),
@@ -297,7 +305,7 @@ def generate_html(results, out_path):
     failed = sum(1 for r in results if r["status"] == "fail")
     skipped = sum(1 for r in results if r["status"] in ("both_skip", "go_error", "rust_error"))
     pct = (passed / total * 100) if total else 0
-    NCOLS = 14
+    NCOLS = 15
 
     cats = defaultdict(list)
     for r in results:
@@ -362,6 +370,7 @@ def generate_html(results, out_path):
             rows.append(f'''<tr class="fix-row toggle" data-status="{s}" onclick="toggleDetail('{detail_id}')">
 <td><span style="color:{color}">{icon}</span></td>
 <td class="mono fname">{escape(e["fixture"][:40])}</td>
+<td class="mono" style="font-size:.65rem;color:#8b949e">{escape(e["compared_to"])}</td>
 <td class="ghcol mono r">{e["go_bytes"]}</td>
 <td class="ghcol mono r go">{fmt_us(e["go_warm_us"])}</td>
 <td class="ghcol mono r go">{e["go_ms"]:.1f}ms</td>
@@ -434,7 +443,7 @@ h2{{font-size:1.2rem;color:#f0f6fc;margin:1.5rem 0 .8rem}}
 .fbtn{{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:.4rem 1rem;border-radius:6px;cursor:pointer;font-size:.85rem}}
 .fbtn.on{{background:#388bfd20;border-color:#388bfd;color:#58a6ff}}
 table{{width:100%;border-collapse:collapse}}
-th{{background:#161b22;padding:.5rem .6rem;text-align:left;font-size:.65rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d;position:sticky;top:0;z-index:2}}
+th{{background:#161b22;padding:.5rem .6rem;text-align:left;font-size:.65rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d}}
 th.r{{text-align:right}}
 td{{padding:.35rem .6rem;border-bottom:1px solid #21262d;font-size:.78rem}}
 td.r{{text-align:right}}
@@ -522,7 +531,7 @@ Compares Go to Rust (underlying implementation) and Python (native reference).</
 
 <table><thead>
 <tr>
-<th rowspan="2"></th><th rowspan="2">Fixture</th>
+<th rowspan="2"></th><th rowspan="2">Fixture</th><th rowspan="2">Compared to</th>
 <th colspan="3" class="th-group th-group-gh">goheadroom</th>
 <th colspan="6" class="th-group th-group-hr">headroom</th>
 <th colspan="2" rowspan="2" style="text-align:center;font-size:.65rem;border-bottom:1px solid #30363d">Comparison</th>
