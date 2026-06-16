@@ -151,6 +151,28 @@ func (sc *SmartCrusher) processArray(v []interface{}, precomputedRaw []json.RawM
 				infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->len="+strconv.Itoa(len(*result.Compacted))+")")
 				return *result.Compacted, strings.Join(infoParts, ",")
 			}
+
+			// When the lossless-first compaction stage is not configured
+			// (Compaction == nil), the lossy path still needs to emit
+			// CSV-schema output to match the Python/Rust SOT. Run
+			// tabular compaction on the ORIGINAL items (all of them)
+			// and substitute the array with the rendered string, while
+			// preserving the lossy strategy annotation.
+			if sc.Compaction == nil && result.StrategyInfo != "none:adaptive_at_limit" {
+				tc := compaction.NewTabularCompactor()
+				c := tc.Compact(v)
+				if c.WasCompacted() {
+					f := &compaction.CSVSchemaFormatter{}
+					rendered := f.FormatCompaction(c)
+					keptCount := len(result.KeptIndices)
+					if keptCount == 0 {
+						keptCount = len(result.Items)
+					}
+					infoParts = append(infoParts, result.StrategyInfo+"("+strconv.Itoa(n)+"->"+strconv.Itoa(keptCount)+")")
+					return rendered, strings.Join(infoParts, ",")
+				}
+			}
+
 			if result.KeptIndices != nil {
 				kept := make([]interface{}, len(result.KeptIndices))
 				for i, idx := range result.KeptIndices {
