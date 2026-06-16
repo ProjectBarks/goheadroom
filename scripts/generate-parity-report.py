@@ -15,7 +15,7 @@ from collections import defaultdict
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 
-NORMALIZE_TRANSFORMS = {"content_detector", "ccr", "cache_aligner"}
+PYTHON_NATIVE_TRANSFORMS = {"content_detector", "ccr", "cache_aligner", "code_compressor", "json_compressor"}
 
 def parse_args():
     p = argparse.ArgumentParser(description="Generate goheadroom parity report")
@@ -215,7 +215,21 @@ def main():
         go_norm = normalize_output(transform, go_out)
         rust_norm = normalize_output(transform, rust_out)
 
-        if not rust_bin:
+        # Determine comparison target: Python for native transforms, Rust for Rust-backed ones
+        use_python = transform in PYTHON_NATIVE_TRANSFORMS and python_bin and python_rc == 0
+
+        if use_python:
+            python_norm = normalize_output(transform, python_out)
+            if go_rc != 0:
+                status = "go_error"
+                compared_to = "-"
+            elif go_norm == python_norm:
+                status = "pass"
+                compared_to = "Python"
+            else:
+                status = "fail"
+                compared_to = "Python"
+        elif not rust_bin:
             status = "pass" if go_rc == 0 else "go_error"
             compared_to = "Go-only"
         elif go_rc != 0 and rust_rc != 0:
@@ -225,22 +239,19 @@ def main():
             status = "go_error"
             compared_to = "-"
         elif rust_rc != 0:
-            # Rust doesn't support this transform — pass if Go ran OK
             status = "pass" if go_rc == 0 else "rust_error"
             compared_to = "Go-only"
         elif go_norm == rust_norm:
             status = "pass"
             compared_to = "Rust"
-        elif transform in NORMALIZE_TRANSFORMS:
-            status = "pass"
-            compared_to = "Rust (normalized)"
         else:
             status = "fail"
             compared_to = "Rust"
 
         diff_html = ""
         if status == "fail":
-            diff_html = compute_diff_html(go_out[:3000], rust_out[:3000])
+            compare_out = python_out if use_python else rust_out
+            diff_html = compute_diff_html(go_out[:3000], compare_out[:3000])
 
         # Warm benchmarks via --bench (library-only, no startup)
         # Skip for transforms that aren't actually exercised (cache_aligner)

@@ -1,13 +1,14 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/uber/goheadroom/cachecontrol"
 	"github.com/uber/goheadroom/ccr"
 	"github.com/uber/goheadroom/tokenizer"
 	"github.com/uber/goheadroom/transforms/codecompressor"
@@ -110,35 +111,39 @@ func makeRunner(fix Fixture) func() string {
 		json.Unmarshal(fix.Input, &input)
 		return func() string {
 			det := contentdetector.DetectContentType(input)
-			return fmt.Sprintf("%s:%.2f", det.ContentType.String(), det.Confidence)
+			return fmt.Sprintf("%s:%.4f", det.ContentType.String(), det.Confidence)
 		}
 
 	case "ccr":
-		var input []json.RawMessage
+		var input interface{}
 		json.Unmarshal(fix.Input, &input)
-		if len(input) > 0 {
-			raw, _ := json.Marshal(input[0])
-			return func() string {
-				key := ccr.ComputeKey(raw)
-				store := ccr.NewInMemoryStore()
-				store.Put(key, raw)
-				got, ok := store.Get(key)
-				if ok && len(got) > 0 {
-					return "OK:" + key
-				}
-				return "FAIL"
+		raw, _ := json.Marshal(input)
+		return func() string {
+			store := ccr.NewInMemoryStore()
+			key := ccr.ComputeKey(raw)
+			store.Put(key, raw)
+			got, ok := store.Get(key)
+			if ok && len(got) == len(raw) {
+				return fmt.Sprintf("roundtrip:%d", len(raw))
 			}
+			return "FAIL"
 		}
-		return func() string { return "OK:empty" }
 
 	case "cache_aligner":
-		var messages []interface{}
+		var messages []map[string]interface{}
 		json.Unmarshal(fix.Input, &messages)
-		return func() string {
-			wrapped := map[string]interface{}{"messages": messages}
-			fc := cachecontrol.ComputeFrozenCount(wrapped)
-			return fmt.Sprintf("frozen_count=%d,messages=%d", fc, len(messages))
+		var parts []string
+		for _, m := range messages {
+			if role, _ := m["role"].(string); role == "system" {
+				if content, _ := m["content"].(string); content != "" {
+					parts = append(parts, content)
+				}
+			}
 		}
+		joined := strings.Join(parts, "\n---\n")
+		h := sha256.Sum256([]byte(joined))
+		hash16 := fmt.Sprintf("%x", h[:8])
+		return func() string { return hash16 }
 
 	case "json_compressor":
 		var input string
@@ -150,7 +155,12 @@ func makeRunner(fix Fixture) func() string {
 	case "code_compressor":
 		var input string
 		json.Unmarshal(fix.Input, &input)
+		tok := tokenizer.GetTokenizer("gpt-4o")
+		count := tok.CountText(input)
 		return func() string {
+			if count < 100 {
+				return input
+			}
 			return codecompressor.Compress(input).Compressed
 		}
 

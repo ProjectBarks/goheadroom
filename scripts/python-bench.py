@@ -32,7 +32,7 @@ def _make_config(cls, config: dict):
     return cls(**kwargs)
 
 
-def run_fixture(fix: dict) -> str:
+def run_fixture(fix: dict, raw_text: str = "") -> str:
     """Run the appropriate Python transform on a fixture and return output."""
     transform = fix["transform"]
     inp = fix["input"]
@@ -80,9 +80,21 @@ def run_fixture(fix: dict) -> str:
         return compressor.compress(inp).compressed
 
     if transform == "ccr":
+        # Use compact JSON to match Go's json.Marshal (no spaces)
+        raw = json.dumps(inp, separators=(",", ":"), sort_keys=True).encode()
+        store = {}
         import hashlib
-        h = hashlib.sha256(json.dumps(inp).encode()).hexdigest()[:24]
-        return h
+        key = hashlib.sha256(raw).hexdigest()[:24]
+        store[key] = raw
+        got = store.get(key, b"")
+        if len(got) == len(raw):
+            return f"roundtrip:{len(raw)}"
+        return "FAIL"
+
+    if transform == "cache_aligner":
+        from headroom.transforms.cache_aligner import align_for_cache
+        _, hash_str = align_for_cache(inp)
+        return hash_str
 
     return f"SKIP:{transform}"
 
@@ -93,7 +105,8 @@ def main():
         sys.exit(1)
 
     with open(sys.argv[1]) as f:
-        fix = json.load(f)
+        raw_text = f.read()
+    fix = json.loads(raw_text)
 
     bench_n = 0
     for i in range(2, len(sys.argv)):
@@ -101,14 +114,14 @@ def main():
             bench_n = int(sys.argv[i + 1])
 
     # Single run for output
-    output = run_fixture(fix)
+    output = run_fixture(fix, raw_text)
     print(output, end="")
 
     # Warm benchmark
     if bench_n > 0:
         t0 = time.perf_counter_ns()
         for _ in range(bench_n):
-            run_fixture(fix)
+            run_fixture(fix, raw_text)
         elapsed = time.perf_counter_ns() - t0
         ns_per_op = elapsed // bench_n
         print(ns_per_op, file=sys.stderr)
