@@ -68,8 +68,8 @@ func main() {
 		for _, s := range report.Skipped {
 			results = append(results, result{Transform: name, Fixture: s.Fixture, Status: "skip", GoMs: ms, Message: s.Reason})
 		}
-		for i := 0; i < report.Matched; i++ {
-			results = append(results, result{Transform: name, Status: "pass", GoMs: ms})
+		for _, fixName := range report.Passed {
+			results = append(results, result{Transform: name, Fixture: fixName, Status: "pass", GoMs: ms})
 		}
 	}
 

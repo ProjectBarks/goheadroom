@@ -36,6 +36,7 @@ type Diff struct {
 type Report struct {
 	Transform string
 	Matched   int
+	Passed    []string // fixture names that matched
 	Diffs     []Diff
 	Skipped   []SkippedFixture
 }
@@ -92,6 +93,7 @@ func RunComparator(dir string, c Comparator, preprocessors ...Preprocessor) (*Re
 			report.Diffs = append(report.Diffs, Diff{Fixture: fix.Name, CmpDiff: diff})
 		} else {
 			report.Matched++
+			report.Passed = append(report.Passed, fix.Name)
 		}
 	}
 	return report, nil
