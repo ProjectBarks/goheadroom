@@ -3,7 +3,7 @@
   "config": {},
   "input": "def hello(name: str) -> str:\n    message = f'Hello, {name}!'\n    return message\n",
   "output": {
-    "compressed": "def hello(name: str) -> str:\n\n    # [1 lines omitted]\n    pass\n",
+    "compressed": "def hello(name: str) -> str:\n    message = f'Hello, {name}!'\n    return message\n",
     "language": "Python"
   },
   "input_sha256": "da3447880ebaba2b",

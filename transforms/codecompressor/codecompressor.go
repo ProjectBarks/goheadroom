@@ -244,6 +244,14 @@ func configFor(lang Language) *langConfig {
 	return nil
 }
 
+func estimateTokens(s string) int {
+	n := len(s) / 4
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
 // Compress detects the language, parses with tree-sitter, and compresses by
 // eliding function/method bodies while preserving imports, types, and signatures.
 func Compress(content string) Result {
@@ -258,6 +266,11 @@ func Compress(content string) Result {
 			Language:   Unknown,
 			Confidence: 0,
 		}
+	}
+
+	// Match Python's min_tokens_for_compression=100 threshold
+	if estimateTokens(content) < 100 {
+		return Result{Compressed: content, Language: lang}
 	}
 
 	cfg := configFor(lang)

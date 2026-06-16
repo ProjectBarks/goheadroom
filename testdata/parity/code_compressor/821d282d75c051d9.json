@@ -3,7 +3,7 @@
   "config": {},
   "input": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
   "output": {
-    "compressed": "pub fn add(a: i32, b: i32) -> i32 { // [2 lines omitted] }\n",
+    "compressed": "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
     "language": "Rust"
   },
   "input_sha256": "821d282d75c051d9",

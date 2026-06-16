@@ -3,7 +3,7 @@
   "config": {},
   "input": "function greet(name) {\n  const msg = `Hello ${name}`;\n  return msg;\n}\n",
   "output": {
-    "compressed": "function greet(name) { // [3 lines omitted] }\n",
+    "compressed": "function greet(name) {\n  const msg = `Hello ${name}`;\n  return msg;\n}\n",
     "language": "JavaScript"
   },
   "input_sha256": "b827bb6ed5f5f023",

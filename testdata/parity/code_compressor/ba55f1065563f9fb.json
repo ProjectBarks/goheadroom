@@ -3,7 +3,7 @@
   "config": {},
   "input": "#include <stdio.h>\n\nint main() {\n    printf(\"hello\");\n    return 0;\n}\n",
   "output": {
-    "compressed": "#include <stdio.h>\n\nint main() { // [3 lines omitted] }\n",
+    "compressed": "#include <stdio.h>\n\nint main() {\n    printf(\"hello\");\n    return 0;\n}\n",
     "language": "C"
   },
   "input_sha256": "ba55f1065563f9fb",

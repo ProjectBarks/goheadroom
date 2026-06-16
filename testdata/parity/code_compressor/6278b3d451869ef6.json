@@ -3,7 +3,7 @@
   "config": {},
   "input": "func Add(a int, b int) int {\n\treturn a + b\n}\n",
   "output": {
-    "compressed": "func Add(a int, b int) int { // [2 lines omitted] }\n",
+    "compressed": "func Add(a int, b int) int {\n\treturn a + b\n}\n",
     "language": "Go"
   },
   "input_sha256": "6278b3d451869ef6",

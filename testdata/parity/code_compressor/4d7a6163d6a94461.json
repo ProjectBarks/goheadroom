@@ -3,7 +3,7 @@
   "config": {},
   "input": "class MyClass:\n    def __init__(self):\n        self.x = 1\n        self.y = 2\n",
   "output": {
-    "compressed": "class MyClass:\n    def __init__(self):\n\n        # [1 lines omitted]\n        pass\n",
+    "compressed": "class MyClass:\n    def __init__(self):\n        self.x = 1\n        self.y = 2\n",
     "language": "Python"
   },
   "input_sha256": "4d7a6163d6a94461",

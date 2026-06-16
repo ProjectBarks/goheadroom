@@ -25,6 +25,7 @@ const sampleGoCode = `package example
 import (
 	"fmt"
 	"strings"
+	"strconv"
 )
 
 func ProcessInput(input string) string {
@@ -33,8 +34,10 @@ func ProcessInput(input string) string {
 		return ""
 	}
 	result := fmt.Sprintf("processed: %s", trimmed)
-	// Additional logic here
-	return result
+	upper := strings.ToUpper(result)
+	lower := strings.ToLower(result)
+	combined := upper + ":" + lower
+	return combined
 }
 
 func HelperFunc(a, b int) int {
@@ -42,27 +45,53 @@ func HelperFunc(a, b int) int {
 	if sum < 0 {
 		return 0
 	}
+	product := a * b
+	diff := a - b
+	_ = product
+	_ = diff
 	return sum
+}
+
+func FormatNumber(n int) string {
+	s := strconv.Itoa(n)
+	if len(s) > 5 {
+		s = s[:5] + "..."
+	}
+	return fmt.Sprintf("[%s]", s)
 }
 `
 
 const samplePythonCode = `import os
 import sys
+from collections import defaultdict
 
 def process_data(data):
-    """Process the given data."""
+    """Process the given data and return cleaned results."""
     if not data:
         return None
     result = []
+    seen = set()
     for item in data:
-        result.append(item.strip())
+        cleaned = item.strip()
+        if cleaned and cleaned not in seen:
+            result.append(cleaned)
+            seen.add(cleaned)
     return result
 
 def helper(x, y):
+    """Compute the sum with floor at zero."""
     total = x + y
+    minimum = min(x, y)
+    maximum = max(x, y)
     if total < 0:
         return 0
     return total
+
+def count_items(items):
+    counts = defaultdict(int)
+    for item in items:
+        counts[item] += 1
+    return dict(counts)
 `
 
 func TestCodeOffloadNameAndAppliesTo(t *testing.T) {
