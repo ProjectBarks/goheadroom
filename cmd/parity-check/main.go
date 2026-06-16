@@ -1,18 +1,14 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/uber/goheadroom/cachecontrol"
-	"github.com/uber/goheadroom/ccr"
 	"github.com/uber/goheadroom/tokenizer"
 	"github.com/uber/goheadroom/transforms/codecompressor"
 	"github.com/uber/goheadroom/transforms/contentdetector"
@@ -201,7 +197,6 @@ func runSmartCrusher(fix Fixture, r Result) Result {
 	}
 
 	crusher := smartcrusher.NewSmartCrusherBuilder(cfg).WithDefaultOSSSetup().Build()
-	crusher.Compaction = nil
 	res := crusher.Crush(inputWrapper.Content, inputWrapper.Query, inputWrapper.Bias)
 	r.GoOutput = res.Compressed
 	r.GoBytes = len(res.Compressed)
@@ -211,14 +206,11 @@ func runSmartCrusher(fix Fixture, r Result) Result {
 	}
 	json.Unmarshal(fix.Output, &expected)
 
-	exp := stripCCRMarkers(expected.Compressed)
-	exp = normalizeJSONFloats(exp)
-
-	if res.Compressed == exp {
+	if res.Compressed == expected.Compressed {
 		r.Status = "pass"
 	} else {
 		r.Status = "fail"
-		r.Message = fmt.Sprintf("output mismatch: go=%d vs expected=%d bytes", len(res.Compressed), len(exp))
+		r.Message = fmt.Sprintf("output mismatch: go=%d vs expected=%d bytes", len(res.Compressed), len(expected.Compressed))
 	}
 	return r
 }
@@ -260,7 +252,7 @@ func runContentDetector(fix Fixture, r Result) Result {
 	r.GoOutput = fmt.Sprintf("%s (%.2f)", goType, det.Confidence)
 	r.GoBytes = len(goType)
 
-	if strings.EqualFold(goType, expected.ContentType) {
+	if goType == expected.ContentType {
 		r.Status = "pass"
 	} else {
 		r.Status = "fail"
@@ -270,32 +262,15 @@ func runContentDetector(fix Fixture, r Result) Result {
 }
 
 func runCCR(fix Fixture, r Result) Result {
-	var input []json.RawMessage
-	json.Unmarshal(fix.Input, &input)
-
-	if len(input) == 0 {
-		r.Status = "skip"
-		r.Message = "empty input"
-		return r
-	}
-
-	// CCR fixtures test tool injection. Compute the hash of the input.
-	h := sha256.Sum256(fix.Input)
-	key := fmt.Sprintf("%x", h[:12])
-	r.GoOutput = key
-	r.GoBytes = len(key)
-
-	// Verify the CCR store interface works
-	store := ccr.NewInMemoryStore()
-	storeKey := ccr.ComputeKey(fix.Input)
-	store.Put(storeKey, fix.Input)
-	_, ok := store.Get(storeKey)
-	if ok {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = "CCR store round-trip failed"
-	}
+	// CCR fixtures test tool injection: Rust takes a tool list, injects a
+	// headroom_retrieve tool, and returns [modified_list, true] with an
+	// "OK:<hash>" output. Go's ccr package only implements the key-value
+	// store interface (ComputeKey, Put, Get) and does not have tool
+	// injection logic. The outputs are fundamentally different
+	// (Rust: "OK:<hash>", Go: "roundtrip:<len>"). No byte-identical
+	// comparison is possible until Go implements tool injection.
+	r.Status = "skip"
+	r.Message = "Go ccr package lacks tool injection; Rust outputs OK:<hash>, Go tests store round-trip only"
 	return r
 }
 
@@ -343,16 +318,6 @@ func runCodeCompressor(fix Fixture, r Result) Result {
 	return r
 }
 
-var ccrMarkerRe = regexp.MustCompile(`,?\{"_ccr_dropped":"<<ccr:[^>]+>>"\}`)
-var floatDotZeroRe = regexp.MustCompile(`(\d)\.0([,}\]\s])`)
-
-func stripCCRMarkers(s string) string {
-	return ccrMarkerRe.ReplaceAllString(s, "")
-}
-
-func normalizeJSONFloats(s string) string {
-	return floatDotZeroRe.ReplaceAllString(s, "${1}${2}")
-}
 
 func applySmartCrusherConfig(cfg *smartcrusher.SmartCrusherConfig, m map[string]interface{}) {
 	if v, ok := m["enabled"].(bool); ok { cfg.Enabled = v }
@@ -376,31 +341,13 @@ func applySmartCrusherConfig(cfg *smartcrusher.SmartCrusherConfig, m map[string]
 
 
 func runCacheAligner(fix Fixture, r Result) Result {
-	var messages []interface{}
-	json.Unmarshal(fix.Input, &messages)
-
-	wrapped := map[string]interface{}{"messages": messages}
-	frozenCount := cachecontrol.ComputeFrozenCount(wrapped)
-	r.GoOutput = fmt.Sprintf("frozen_count=%d", frozenCount)
-	r.GoBytes = frozenCount
-
-	var expected struct {
-		TokensBefore      int      `json:"tokens_before"`
-		TokensAfter       int      `json:"tokens_after"`
-		TransformsApplied []string `json:"transforms_applied"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	// cache_aligner is a pipeline-level operation. Go's cachecontrol package
-	// computes frozen counts from Anthropic-style content blocks with
-	// cache_control markers. The fixtures use OpenAI-style plain string
-	// content, so frozen_count will be 0. We verify the Go package runs
-	// without error and that the fixture structure is valid.
-	if expected.TokensBefore > 0 && len(messages) > 0 {
-		r.Status = "pass"
-	} else {
-		r.Status = "pass"
-	}
+	// cache_aligner is a pipeline-level operation in Rust that applies
+	// token-aware transforms to message arrays. Go's cachecontrol package
+	// implements a different API (frozen count computation for Anthropic-style
+	// cache_control markers). The Rust bench itself outputs "SKIP:cache_aligner".
+	// No meaningful byte-identical comparison is possible.
+	r.Status = "skip"
+	r.Message = "Go cachecontrol API differs from Rust cache_aligner pipeline; Rust bench skips this transform"
 	return r
 }
 
@@ -415,18 +362,29 @@ func runE2EUnmutated(fix Fixture, r Result) Result {
 	}
 
 	var expected struct {
-		Mutated bool `json:"mutated"`
+		Mutated     bool   `json:"mutated"`
+		ContentType string `json:"content_type"`
 	}
 	json.Unmarshal(fix.Output, &expected)
 
-	if !expected.Mutated && !ok {
-		r.Status = "pass"
-	} else if expected.Mutated && ok {
-		r.Status = "pass"
-	} else {
+	if expected.Mutated != ok {
 		r.Status = "fail"
 		r.Message = fmt.Sprintf("expected mutated=%v, got ok=%v", expected.Mutated, ok)
+		return r
 	}
+
+	// Also validate content_type if the fixture provides one
+	if expected.ContentType != "" {
+		det := contentdetector.DetectContentType(input)
+		goType := det.ContentType.String()
+		if goType != expected.ContentType {
+			r.Status = "fail"
+			r.Message = fmt.Sprintf("content_type: go=%s, expected=%s", goType, expected.ContentType)
+			return r
+		}
+	}
+
+	r.Status = "pass"
 	return r
 }
 
