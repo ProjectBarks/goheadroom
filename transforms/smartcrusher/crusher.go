@@ -538,12 +538,19 @@ func estimateArrayBytes(itemStrings []string) int {
 }
 
 func estimateArrayBytesRaw(items []json.RawMessage) int {
-	total := 2
+	total := 2 // outer brackets
 	for i, raw := range items {
 		if i > 0 {
-			total += 2
+			total++ // comma separator (no space, matching Rust serde_json)
 		}
-		total += len(raw)
+		// Re-compact to match Rust's serde_json::to_string which strips whitespace
+		var v interface{}
+		if err := json.Unmarshal(raw, &v); err == nil {
+			compact, _ := json.Marshal(v)
+			total += len(compact)
+		} else {
+			total += len(raw)
+		}
 	}
 	return total
 }

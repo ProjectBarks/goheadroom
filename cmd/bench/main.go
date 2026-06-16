@@ -98,7 +98,7 @@ func makeRunner(fix Fixture) func() string {
 		}
 		json.Unmarshal(fix.Input, &w)
 		cfg := smartcrusher.DefaultSmartCrusherConfig()
-		crusher := smartcrusher.NewSmartCrusherBuilder(cfg).Build()
+		crusher := smartcrusher.NewSmartCrusherBuilder(cfg).WithDefaultOSSSetup().Build()
 		return func() string { return crusher.Crush(w.Content, w.Query, w.Bias).Compressed }
 
 	case "tokenizer":

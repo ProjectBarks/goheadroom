@@ -551,12 +551,13 @@ func (f *MarkdownKVFormatter) FormatRow(schema *Schema, row *Row) string {
 
 // TabularCompactor compacts arrays of objects into tabular IR.
 type TabularCompactor struct {
-	Config ClassifyConfig
+	Config               ClassifyConfig
+	MaxFlattenInnerKeys  int
 }
 
 // NewTabularCompactor creates a compactor with default config.
 func NewTabularCompactor() *TabularCompactor {
-	return &TabularCompactor{Config: DefaultClassifyConfig()}
+	return &TabularCompactor{Config: DefaultClassifyConfig(), MaxFlattenInnerKeys: 6}
 }
 
 // Compact compacts an array of JSON objects into a Compaction.
@@ -631,11 +632,181 @@ func (tc *TabularCompactor) Compact(items []interface{}) *Compaction {
 		schema.Fields[i] = FieldSpec{Name: name, TypeTag: typeTags[i], Nullable: nullables[i]}
 	}
 
+	// Flatten nested-uniform object fields into dotted columns (e.g. meta.region, meta.tier)
+	tc.flattenUniformNested(&schema, rows)
+
 	return &Compaction{
 		Kind:          CompactionTable,
 		Schema:        schema,
 		Rows:          rows,
 		OriginalCount: nItems,
+	}
+}
+
+// CompactionStage wraps a TabularCompactor + Formatter for the crush_array pipeline.
+
+// flattenUniformNested promotes object-typed columns into dotted sub-columns
+// when every row has the same inner key set, matching Rust's flatten_uniform_nested.
+func (tc *TabularCompactor) flattenUniformNested(schema *Schema, rows []Row) {
+	i := 0
+	for i < len(schema.Fields) {
+		innerKeys := uniformObjectKeys(schema.Fields, rows, i)
+		if innerKeys == nil || len(innerKeys) == 0 || len(innerKeys) > tc.MaxFlattenInnerKeys {
+			i++
+			continue
+		}
+
+		parentName := schema.Fields[i].Name
+		nNew := len(innerKeys)
+
+		// Build replacement FieldSpecs
+		newSpecs := make([]FieldSpec, nNew)
+		for j, k := range innerKeys {
+			newSpecs[j] = FieldSpec{Name: parentName + "." + k, TypeTag: "string", Nullable: false}
+		}
+
+		// Splice schema.Fields: replace [i] with newSpecs
+		updated := make([]FieldSpec, 0, len(schema.Fields)-1+nNew)
+		updated = append(updated, schema.Fields[:i]...)
+		updated = append(updated, newSpecs...)
+		updated = append(updated, schema.Fields[i+1:]...)
+		schema.Fields = updated
+
+		// Expand each row's cells
+		for r := range rows {
+			original := rows[r].Cells[i]
+			expanded := make([]CellValue, nNew)
+
+			var innerObj map[string]interface{}
+			if original.Kind == KindScalar {
+				if m, ok := original.Scalar.(map[string]interface{}); ok {
+					innerObj = m
+				}
+			}
+
+			for j, k := range innerKeys {
+				if innerObj == nil {
+					expanded[j] = CellValue{Kind: KindMissing}
+				} else if v, exists := innerObj[k]; !exists {
+					expanded[j] = CellValue{Kind: KindMissing}
+				} else {
+					expanded[j] = CellValue{Kind: KindScalar, Scalar: v}
+				}
+			}
+
+			newCells := make([]CellValue, 0, len(rows[r].Cells)-1+nNew)
+			newCells = append(newCells, rows[r].Cells[:i]...)
+			newCells = append(newCells, expanded...)
+			newCells = append(newCells, rows[r].Cells[i+1:]...)
+			rows[r].Cells = newCells
+		}
+
+		// Refine type tags and nullability from actual data
+		for offset := 0; offset < nNew; offset++ {
+			colIdx := i + offset
+			nullable := false
+			tag := inferTypeTagFromCells(rows, colIdx, &nullable)
+			schema.Fields[colIdx].TypeTag = tag
+			schema.Fields[colIdx].Nullable = nullable
+		}
+
+		i += nNew
+	}
+}
+
+// uniformObjectKeys returns the sorted inner key set if every non-missing cell
+// at column col is an object with the same key set. Returns nil otherwise.
+func uniformObjectKeys(fields []FieldSpec, rows []Row, col int) []string {
+	if strings.Contains(fields[col].Name, ".") {
+		return nil
+	}
+	var canonical []string
+	sawObject := false
+	for _, row := range rows {
+		if col >= len(row.Cells) {
+			return nil
+		}
+		cell := row.Cells[col]
+		if cell.Kind == KindMissing {
+			continue
+		}
+		if cell.Kind != KindScalar {
+			return nil
+		}
+		obj, ok := cell.Scalar.(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		sawObject = true
+		keys := make([]string, 0, len(obj))
+		for k := range obj {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if canonical == nil {
+			canonical = keys
+		} else {
+			if len(keys) != len(canonical) {
+				return nil
+			}
+			for j, k := range keys {
+				if k != canonical[j] {
+					return nil
+				}
+			}
+		}
+	}
+	if !sawObject {
+		return nil
+	}
+	return canonical
+}
+
+// inferTypeTagFromCells determines the type tag for a column by inspecting all rows.
+func inferTypeTagFromCells(rows []Row, col int, nullable *bool) string {
+	tag := "string"
+	sawValue := false
+	for _, row := range rows {
+		if col >= len(row.Cells) {
+			*nullable = true
+			continue
+		}
+		cell := row.Cells[col]
+		switch cell.Kind {
+		case KindMissing:
+			*nullable = true
+		case KindScalar:
+			if cell.Scalar == nil {
+				*nullable = true
+				continue
+			}
+			t := typeTagFor(cell.Scalar)
+			if !sawValue {
+				tag = t
+				sawValue = true
+			} else if t != tag {
+				tag = "json"
+			}
+		default:
+			tag = "json"
+		}
+	}
+	return tag
+}
+
+func typeTagFor(v interface{}) string {
+	switch val := v.(type) {
+	case bool:
+		return "bool"
+	case float64:
+		if val == float64(int64(val)) {
+			return "int"
+		}
+		return "float"
+	case string:
+		return "string"
+	default:
+		return "json"
 	}
 }
 
