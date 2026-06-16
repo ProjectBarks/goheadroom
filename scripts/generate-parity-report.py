@@ -443,7 +443,7 @@ h2{{font-size:1.2rem;color:#f0f6fc;margin:1.5rem 0 .8rem}}
 .fbtn{{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:.4rem 1rem;border-radius:6px;cursor:pointer;font-size:.85rem}}
 .fbtn.on{{background:#388bfd20;border-color:#388bfd;color:#58a6ff}}
 table{{width:100%;border-collapse:collapse}}
-th{{background:#161b22;padding:.5rem .6rem;text-align:left;font-size:.65rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d}}
+th{{background:#161b22;padding:.5rem .6rem;text-align:left;font-size:.65rem;color:#8b949e;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid #30363d;position:sticky;z-index:2}}
 th.r{{text-align:right}}
 td{{padding:.35rem .6rem;border-bottom:1px solid #21262d;font-size:.78rem}}
 td.r{{text-align:right}}
@@ -546,6 +546,14 @@ Compares Go to Rust (underlying implementation) and Python (native reference).</
 </tbody></table>
 </div>
 <script>
+document.querySelectorAll('thead').forEach(thead=>{{
+const rows=thead.querySelectorAll('tr');
+let top=0;
+rows.forEach(r=>{{
+r.querySelectorAll('th').forEach(th=>{{th.style.top=top+'px'}});
+top+=r.offsetHeight;
+}});
+}});
 function filt(f,btn){{document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('on'));btn.classList.add('on');
 document.querySelectorAll('.fix-row').forEach(r=>{{const s=r.dataset.status;
 if(f==='all')r.classList.remove('fhide');
