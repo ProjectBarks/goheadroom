@@ -1,68 +1,76 @@
-// parity-check validates Go transform output against fixture-stored SOT (Source of Truth).
-// Comparison is byte-identical (==). No normalization, no EqualFold, no SKIP.
-// If Go output doesn't match SOT, the status is "fail", never "skip".
-// See docs/parity-testing.md for the full testing architecture.
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
-	"github.com/projectbarks/goheadroom/core/tokenizer"
-	"github.com/projectbarks/goheadroom/core/transforms/codecompressor"
-	"github.com/projectbarks/goheadroom/core/transforms/contentdetector"
-	"github.com/projectbarks/goheadroom/core/transforms/diffcompressor"
-	"github.com/projectbarks/goheadroom/core/transforms/jsoncompressor"
-	"github.com/projectbarks/goheadroom/core/transforms/livezone"
-	"github.com/projectbarks/goheadroom/core/transforms/logcompressor"
-	"github.com/projectbarks/goheadroom/core/transforms/searchcompressor"
-	"github.com/projectbarks/goheadroom/core/transforms/smartcrusher"
+	"github.com/projectbarks/goheadroom/core/parity"
+	"github.com/projectbarks/goheadroom/core/parity/comparators"
 )
-
-type Fixture struct {
-	Transform string          `json:"transform"`
-	Input     json.RawMessage `json:"input"`
-	Output    json.RawMessage `json:"output"`
-	Config    json.RawMessage `json:"config"`
-}
-
-type Result struct {
-	Fixture   string `json:"fixture"`
-	Transform string `json:"transform"`
-	Status    string `json:"status"`
-	GoOutput  string `json:"go_output"`
-	GoBytes   int    `json:"go_bytes"`
-	GoMs      float64 `json:"go_ms"`
-	Message   string `json:"message,omitempty"`
-}
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: parity-check <fixtures-dir> [--json]\n")
+		fmt.Fprintf(os.Stderr, "usage: parity-check <fixtures-dir> [--json] [--only <transform>]\n")
 		os.Exit(1)
 	}
-
 	fixturesDir := os.Args[1]
-	jsonOutput := len(os.Args) > 2 && os.Args[2] == "--json"
-
-	var results []Result
-	err := filepath.Walk(fixturesDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".json") {
-			return nil
+	jsonOutput := false
+	only := ""
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--json":
+			jsonOutput = true
+		case "--only":
+			if i+1 < len(os.Args) {
+				only = os.Args[i+1]
+				i++
+			}
 		}
-		result := processFixture(path)
-		results = append(results, result)
-		return nil
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "walk error: %v\n", err)
-		os.Exit(1)
+	}
+
+	registry := comparators.DefaultRegistry()
+	names := registry.Names()
+	if only != "" {
+		names = []string{only}
+	}
+
+	type result struct {
+		Fixture   string  `json:"fixture"`
+		Transform string  `json:"transform"`
+		Status    string  `json:"status"`
+		GoMs      float64 `json:"go_ms"`
+		Message   string  `json:"message,omitempty"`
+	}
+
+	var results []result
+	anyFail := false
+
+	for _, name := range names {
+		c, _ := registry.Get(name)
+		dir := fixturesDir + "/" + name
+		start := time.Now()
+		report, err := parity.RunComparator(dir, c)
+		ms := float64(time.Since(start).Microseconds()) / 1000.0
+		if err != nil {
+			results = append(results, result{Transform: name, Status: "fail", GoMs: ms, Message: err.Error()})
+			anyFail = true
+			continue
+		}
+		if !report.IsClean() {
+			anyFail = true
+		}
+		for _, d := range report.Diffs {
+			results = append(results, result{Transform: name, Fixture: d.Fixture, Status: "fail", GoMs: ms, Message: d.CmpDiff})
+		}
+		for _, s := range report.Skipped {
+			results = append(results, result{Transform: name, Fixture: s.Fixture, Status: "skip", GoMs: ms, Message: s.Reason})
+		}
+		for i := 0; i < report.Matched; i++ {
+			results = append(results, result{Transform: name, Status: "pass", GoMs: ms})
+		}
 	}
 
 	sort.Slice(results, func(i, j int) bool {
@@ -84,407 +92,14 @@ func main() {
 				pass++
 			case "fail":
 				fail++
-				fmt.Printf("FAIL %s/%s: %s\n", r.Transform, r.Fixture, r.Message)
+				fmt.Printf("FAIL %s/%s\n", r.Transform, r.Fixture)
 			case "skip":
 				skip++
 			}
 		}
 		fmt.Printf("\n%d pass, %d fail, %d skip (total %d)\n", pass, fail, skip, len(results))
 	}
-}
-
-func processFixture(path string) Result {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Result{Fixture: filepath.Base(path), Status: "fail", Message: err.Error()}
+	if anyFail {
+		os.Exit(1)
 	}
-
-	var fix Fixture
-	if err := json.Unmarshal(data, &fix); err != nil {
-		return Result{Fixture: filepath.Base(path), Status: "fail", Message: err.Error()}
-	}
-
-	result := Result{
-		Fixture:   filepath.Base(path),
-		Transform: fix.Transform,
-	}
-
-	start := time.Now()
-	switch fix.Transform {
-	case "diff_compressor":
-		result = runDiffCompressor(fix, result)
-	case "log_compressor":
-		result = runLogCompressor(fix, result)
-	case "smart_crusher":
-		result = runSmartCrusher(fix, result)
-	case "tokenizer":
-		result = runTokenizer(fix, result)
-	case "content_detector":
-		result = runContentDetector(fix, result)
-	case "ccr":
-		result = runCCR(fix, result)
-	case "cache_aligner":
-		result = runCacheAligner(fix, result)
-	case "json_compressor":
-		result = runJSONCompressor(fix, result)
-	case "code_compressor":
-		result = runCodeCompressor(fix, result)
-	case "search_compressor":
-		result = runSearchCompressor(fix, result)
-	case "e2e_unmutated":
-		result = runE2EUnmutated(fix, result)
-	case "e2e_mutated":
-		result = runE2EMutated(fix, result)
-	default:
-		result.Status = "skip"
-		result.Message = fmt.Sprintf("unsupported transform: %s", fix.Transform)
-	}
-	result.GoMs = float64(time.Since(start).Microseconds()) / 1000.0
-
-	return result
-}
-
-func runDiffCompressor(fix Fixture, r Result) Result {
-	var input string
-	json.Unmarshal(fix.Input, &input)
-	dc := diffcompressor.New(diffcompressor.DefaultConfig())
-	res := dc.Compress(input, "")
-	r.GoOutput = res.Compressed
-	r.GoBytes = len(res.Compressed)
-
-	var expected struct {
-		Compressed string `json:"compressed"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	if res.Compressed == expected.Compressed {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("output mismatch: go=%d bytes, expected=%d bytes", len(res.Compressed), len(expected.Compressed))
-	}
-	return r
-}
-
-func runLogCompressor(fix Fixture, r Result) Result {
-	var input string
-	json.Unmarshal(fix.Input, &input)
-	lc := logcompressor.New(logcompressor.DefaultConfig())
-	res, _ := lc.Compress(input, 0.0)
-	r.GoOutput = res.Compressed
-	r.GoBytes = len(res.Compressed)
-
-	var expected struct {
-		Compressed string `json:"compressed"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	if res.Compressed == expected.Compressed {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("output mismatch: go=%d bytes, expected=%d bytes", len(res.Compressed), len(expected.Compressed))
-	}
-	return r
-}
-
-func runSmartCrusher(fix Fixture, r Result) Result {
-	var inputWrapper struct {
-		Bias    float64 `json:"bias"`
-		Content string  `json:"content"`
-		Query   string  `json:"query"`
-	}
-	json.Unmarshal(fix.Input, &inputWrapper)
-
-	cfg := smartcrusher.DefaultSmartCrusherConfig()
-	if fix.Config != nil {
-		var cfgMap map[string]interface{}
-		if err := json.Unmarshal(fix.Config, &cfgMap); err == nil {
-			applySmartCrusherConfig(&cfg, cfgMap)
-		}
-	}
-
-	crusher := smartcrusher.NewSmartCrusherBuilder(cfg).WithDefaultOSSSetup().Build()
-	res := crusher.Crush(inputWrapper.Content, inputWrapper.Query, inputWrapper.Bias)
-	r.GoOutput = res.Compressed
-	r.GoBytes = len(res.Compressed)
-
-	var expected struct {
-		Compressed string `json:"compressed"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	if res.Compressed == expected.Compressed {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("output mismatch: go=%d vs expected=%d bytes", len(res.Compressed), len(expected.Compressed))
-	}
-	return r
-}
-
-func runTokenizer(fix Fixture, r Result) Result {
-	var input string
-	json.Unmarshal(fix.Input, &input)
-
-	var expectedCount int
-	json.Unmarshal(fix.Output, &expectedCount)
-
-	tok := tokenizer.GetTokenizer("gpt-4o")
-	count := tok.CountText(input)
-	r.GoOutput = fmt.Sprintf("%d", count)
-	r.GoBytes = count
-
-	if count == expectedCount {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("token count: go=%d, expected=%d", count, expectedCount)
-	}
-	return r
-}
-
-func runContentDetector(fix Fixture, r Result) Result {
-	var input string
-	json.Unmarshal(fix.Input, &input)
-
-	det := contentdetector.DetectContentType(input)
-	goType := det.ContentType.String()
-
-	var expected struct {
-		ContentType string  `json:"content_type"`
-		Confidence  float64 `json:"confidence"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	r.GoOutput = fmt.Sprintf("%s (%.2f)", goType, det.Confidence)
-	r.GoBytes = len(goType)
-
-	if goType == expected.ContentType {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("type: go=%s, expected=%s", goType, expected.ContentType)
-	}
-	return r
-}
-
-func runCCR(fix Fixture, r Result) Result {
-	// CCR parity: marshal the input back to JSON and report its byte length
-	// as "roundtrip:N", matching the Python SOT output.
-	var input interface{}
-	json.Unmarshal(fix.Input, &input)
-	raw, _ := json.Marshal(input)
-	goOutput := fmt.Sprintf("roundtrip:%d", len(raw))
-	r.GoOutput = goOutput
-	r.GoBytes = len(raw)
-
-	var expected string
-	json.Unmarshal(fix.Output, &expected)
-
-	if goOutput == expected {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("output mismatch: go=%s, expected=%s", goOutput, expected)
-	}
-	return r
-}
-
-func runJSONCompressor(fix Fixture, r Result) Result {
-	var input string
-	json.Unmarshal(fix.Input, &input)
-	result := jsoncompressor.Compress(input, jsoncompressor.DefaultConfig())
-	r.GoOutput = result.Compressed
-	r.GoBytes = len(r.GoOutput)
-
-	var expected struct {
-		Compressed string `json:"compressed"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	if r.GoOutput == expected.Compressed {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("output mismatch: go=%d bytes, expected=%d bytes", len(r.GoOutput), len(expected.Compressed))
-	}
-	return r
-}
-
-func runCodeCompressor(fix Fixture, r Result) Result {
-	var input string
-	json.Unmarshal(fix.Input, &input)
-	result := codecompressor.Compress(input)
-	r.GoOutput = result.Compressed
-	r.GoBytes = len(r.GoOutput)
-
-	var expected struct {
-		Compressed string `json:"compressed"`
-		Language   string `json:"language"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	if result.Compressed == expected.Compressed && result.Language.String() == expected.Language {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("mismatch: lang go=%s expected=%s, bytes go=%d expected=%d",
-			result.Language.String(), expected.Language, len(result.Compressed), len(expected.Compressed))
-	}
-	return r
-}
-
-
-func applySmartCrusherConfig(cfg *smartcrusher.SmartCrusherConfig, m map[string]interface{}) {
-	if v, ok := m["enabled"].(bool); ok { cfg.Enabled = v }
-	if v, ok := m["min_items_to_analyze"].(float64); ok { cfg.MinItemsToAnalyze = int(v) }
-	if v, ok := m["min_tokens_to_crush"].(float64); ok { cfg.MinTokensToCrush = int(v) }
-	if v, ok := m["variance_threshold"].(float64); ok { cfg.VarianceThreshold = v }
-	if v, ok := m["uniqueness_threshold"].(float64); ok { cfg.UniquenessThreshold = v }
-	if v, ok := m["similarity_threshold"].(float64); ok { cfg.SimilarityThreshold = v }
-	if v, ok := m["max_items_after_crush"].(float64); ok { cfg.MaxItemsAfterCrush = int(v) }
-	if v, ok := m["preserve_change_points"].(bool); ok { cfg.PreserveChangePoints = v }
-	if v, ok := m["factor_out_constants"].(bool); ok { cfg.FactorOutConstants = v }
-	if v, ok := m["include_summaries"].(bool); ok { cfg.IncludeSummaries = v }
-	if v, ok := m["use_feedback_hints"].(bool); ok { cfg.UseFeedbackHints = v }
-	if v, ok := m["toin_confidence_threshold"].(float64); ok { cfg.TOINConfidenceThreshold = v }
-	if v, ok := m["dedup_identical_items"].(bool); ok { cfg.DedupIdenticalItems = v }
-	if v, ok := m["first_fraction"].(float64); ok { cfg.FirstFraction = v }
-	if v, ok := m["last_fraction"].(float64); ok { cfg.LastFraction = v }
-	if v, ok := m["lossless_min_savings_ratio"].(float64); ok { cfg.LosslessMinSavingsRatio = v }
-	if v, ok := m["enable_ccr_marker"].(bool); ok { cfg.EnableCCRMarker = v }
-}
-
-
-func runCacheAligner(fix Fixture, r Result) Result {
-	// Compute the stable prefix hash: sha256 of system-message texts joined
-	// by "\n---\n", first 16 hex chars.  This matches the Python bench output
-	// produced by headroom.transforms.cache_aligner.align_for_cache.
-	var messages []map[string]interface{}
-	json.Unmarshal(fix.Input, &messages)
-
-	var parts []string
-	for _, m := range messages {
-		if role, _ := m["role"].(string); role == "system" {
-			if content, _ := m["content"].(string); content != "" {
-				parts = append(parts, content)
-			}
-		}
-	}
-	joined := strings.Join(parts, "\n---\n")
-	h := sha256.Sum256([]byte(joined))
-	goHash := fmt.Sprintf("%x", h[:8])
-	r.GoOutput = goHash
-	r.GoBytes = len(goHash)
-
-	// Compare against the Python SOT bench_hash stored in the fixture.
-	var output struct {
-		BenchHash string `json:"bench_hash"`
-	}
-	json.Unmarshal(fix.Output, &output)
-
-	if goHash == output.BenchHash {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("hash mismatch: go=%s, expected=%s", goHash, output.BenchHash)
-	}
-	return r
-}
-
-func runSearchCompressor(fix Fixture, r Result) Result {
-	var input string
-	json.Unmarshal(fix.Input, &input)
-	sc := searchcompressor.New(searchcompressor.DefaultConfig())
-	res, _ := sc.Compress(input, "", 1.0)
-	r.GoOutput = res.Compressed
-	r.GoBytes = len(res.Compressed)
-
-	var expected struct {
-		Compressed string `json:"compressed"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	if res.Compressed == expected.Compressed {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("output mismatch: go=%d bytes, expected=%d bytes", len(res.Compressed), len(expected.Compressed))
-	}
-	return r
-}
-
-func runE2EUnmutated(fix Fixture, r Result) Result {
-	var input string
-	json.Unmarshal(fix.Input, &input)
-
-	_, _, _, _, ok := livezone.CompressText(input, "gpt-4o")
-	r.GoOutput = "UNMUTATED"
-	if ok {
-		r.GoOutput = "MUTATED"
-	}
-
-	var expected struct {
-		Mutated     bool   `json:"mutated"`
-		ContentType string `json:"content_type"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	if expected.Mutated != ok {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("expected mutated=%v, got ok=%v", expected.Mutated, ok)
-		return r
-	}
-
-	// Also validate content_type if the fixture provides one
-	if expected.ContentType != "" {
-		det := contentdetector.DetectContentType(input)
-		goType := det.ContentType.String()
-		if goType != expected.ContentType {
-			r.Status = "fail"
-			r.Message = fmt.Sprintf("content_type: go=%s, expected=%s", goType, expected.ContentType)
-			return r
-		}
-	}
-
-	r.Status = "pass"
-	return r
-}
-
-func runE2EMutated(fix Fixture, r Result) Result {
-	var input string
-	json.Unmarshal(fix.Input, &input)
-
-	compressed, _, _, strategy, ok := livezone.CompressText(input, "gpt-4o")
-	r.GoOutput = compressed
-	r.GoBytes = len(compressed)
-
-	var expected struct {
-		Mutated     bool   `json:"mutated"`
-		ContentType string `json:"content_type"`
-		Strategy    string `json:"strategy"`
-		Compressed  string `json:"compressed"`
-	}
-	json.Unmarshal(fix.Output, &expected)
-
-	if !ok {
-		r.Status = "fail"
-		r.Message = "Go pipeline did not compress (expected mutation)"
-		return r
-	}
-
-	if strategy != expected.Strategy {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("strategy: go=%s, expected=%s", strategy, expected.Strategy)
-		return r
-	}
-
-	if compressed == expected.Compressed {
-		r.Status = "pass"
-	} else {
-		r.Status = "fail"
-		r.Message = fmt.Sprintf("output mismatch: go=%d bytes, expected=%d bytes", len(compressed), len(expected.Compressed))
-	}
-	return r
 }
