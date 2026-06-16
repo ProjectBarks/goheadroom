@@ -1,0 +1,215 @@
+{% from "macros.html.j2" import status_icon, fmt_us, fmt_ratio, parity_badge, summary_row, fixture_row, category_header %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>goheadroom Parity Report</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box }
+    body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; background:#0d1117; color:#c9d1d9 }
+    .wrap { max-width:1600px; margin:0 auto; padding:2rem }
+    h1 { font-size:2rem; color:#f0f6fc; margin-bottom:.3rem }
+    h2 { font-size:1.2rem; color:#f0f6fc; margin:1.5rem 0 .8rem }
+    .sub { color:#8b949e; margin-bottom:1.5rem }
+
+    /* Hero section */
+    .hero { display:flex; align-items:center; gap:2rem; margin:1.5rem 0; flex-wrap:wrap }
+    .ring { width:150px; height:150px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex-shrink:0 }
+    .ring-inner { width:120px; height:120px; border-radius:50%; background:#0d1117; display:flex; align-items:center; justify-content:center; flex-direction:column }
+    .pct { font-size:2.8rem; font-weight:800; color:#f0f6fc }
+    .pct-lbl { font-size:.8rem; color:#8b949e }
+    .cards { display:flex; gap:1rem; flex-wrap:wrap }
+    .card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:1rem 1.5rem; text-align:center; min-width:100px }
+    .card-v { font-size:1.6rem; font-weight:700 }
+    .card-l { font-size:.75rem; color:#8b949e; margin-top:.2rem }
+    .pass { color:#3fb950 }
+    .fail { color:#f85149 }
+    .skip-c { color:#8b949e }
+
+    /* Filters */
+    .filters { margin:1.5rem 0; display:flex; gap:.5rem }
+    .fbtn { background:#21262d; border:1px solid #30363d; color:#c9d1d9; padding:.4rem 1rem; border-radius:6px; cursor:pointer; font-size:.85rem }
+    .fbtn.on { background:#388bfd20; border-color:#388bfd; color:#58a6ff }
+
+    /* Tables */
+    table { width:100%; border-collapse:collapse }
+    th { background:#161b22; padding:.5rem .6rem; text-align:left; font-size:.65rem; color:#8b949e; text-transform:uppercase; letter-spacing:.04em; border-bottom:1px solid #30363d; position:sticky; z-index:2 }
+    th.r { text-align:right }
+    td { padding:.35rem .6rem; border-bottom:1px solid #21262d; font-size:.78rem }
+    td.r { text-align:right }
+    .mono { font-family:'SF Mono','Fira Code',monospace; font-size:.72rem }
+    .fname { max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+    .cat-row td { background:#161b22; padding:.5rem .6rem; border-bottom:1px solid #30363d }
+    .toggle { cursor:pointer }
+    .toggle:hover td { background:#161b2280 }
+    .hidden { display:none }
+    tr.fhide { display:none }
+
+    /* Language colors */
+    td.go, .go { color:#8db9e8 }
+    td.rust, .rust { color:#f0a870 }
+    td.python, .python { color:#c0a0e0 }
+    th.go { color:#00add8 !important }
+    th.rust { color:#f97316 !important }
+    th.python { color:#a855f7 !important }
+
+    /* Summary table */
+    .summary-table { width:100%; margin-bottom:1.5rem }
+    .summary-table td, .summary-table th { padding:.5rem .8rem }
+    .th-group { text-align:center !important; font-size:.7rem; padding:.4rem .6rem; font-weight:700 }
+    .th-group-gh { border-bottom:3px solid #00add8; color:#00add8 }
+    .th-group-hr { border-bottom:3px solid #f97316; color:#f0a870 }
+    .th-sub { text-align:center !important; font-size:.6rem; padding:.2rem .6rem; font-weight:600 }
+    .th-sub-rust { border-bottom:2px solid #f9731640; color:#f97316 }
+    .th-sub-python { border-bottom:2px solid #a855f740; color:#a855f7 }
+    .ghcol { background:#00add80a }
+    .hrcol { background:#f9731606 }
+
+    /* Detail panels */
+    .detail-row td { padding:0; border-bottom:1px solid #30363d }
+    .detail-box { background:#0d1117; border:1px solid #30363d; border-radius:6px; margin:.2rem .5rem .6rem; padding:1rem }
+    .detail-meta { font-size:.75rem; color:#8b949e; margin-bottom:.8rem }
+    .detail-grid { display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:.6rem }
+    .detail-panel { background:#161b22; border:1px solid #21262d; border-radius:4px; overflow:hidden }
+    .detail-label { font-size:.7rem; font-weight:600; padding:.4rem .6rem; background:#21262d; border-bottom:1px solid #30363d; color:#8b949e }
+    .detail-label.go { color:#00add8 }
+    .detail-label.rust { color:#f97316 }
+    .detail-label.python { color:#a855f7 }
+    .detail-bytes { font-weight:400; opacity:.7; margin-left:.5rem }
+    .detail-pre { font-family:'SF Mono','Fira Code',monospace; font-size:.7rem; padding:.5rem .6rem; max-height:250px; overflow:auto; white-space:pre-wrap; word-break:break-all; line-height:1.4; color:#c9d1d9; margin:0 }
+    @media (max-width:1000px) { .detail-grid { grid-template-columns:1fr } }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>goheadroom Parity Report</h1>
+<p class="sub">
+  goheadroom vs headroom &mdash; parity and benchmark comparison across {{ total }} fixtures.<br>
+  Compares Go to Rust (underlying implementation) and Python (native reference).
+</p>
+
+{# ── Hero stats ── #}
+<div class="hero">
+  <div class="ring" style="background:conic-gradient(#3fb950 0% {{ pct }}%,#30363d {{ pct }}% 100%)">
+    <div class="ring-inner">
+      <div class="pct">{{ "%.0f"|format(pct) }}%</div>
+      <div class="pct-lbl">parity</div>
+    </div>
+  </div>
+  <div class="cards">
+    <div class="card"><div class="card-v pass">{{ passed }}</div><div class="card-l">Pass</div></div>
+    <div class="card"><div class="card-v fail">{{ failed }}</div><div class="card-l">Fail</div></div>
+    <div class="card"><div class="card-v skip-c">{{ skipped }}</div><div class="card-l">Skip</div></div>
+    <div class="card"><div class="card-v" style="color:#f0f6fc">{{ total }}</div><div class="card-l">Total</div></div>
+  </div>
+</div>
+
+{# ── Summary by transform ── #}
+<h2>Summary by Transform</h2>
+<table class="summary-table">
+  <thead>
+    <tr>
+      <th rowspan="2">Transform</th>
+      <th rowspan="2" class="r">Parity</th>
+      <th colspan="2" class="th-group th-group-gh">goheadroom</th>
+      <th colspan="4" class="th-group th-group-hr">headroom</th>
+      <th colspan="2" rowspan="2" style="text-align:center;font-size:.65rem;border-bottom:1px solid #30363d">Comparison</th>
+    </tr>
+    <tr>
+      <th class="r go" style="font-size:.6rem">Warm</th>
+      <th class="r go" style="font-size:.6rem">Cold</th>
+      <th class="r rust th-sub th-sub-rust" colspan="2">Rust</th>
+      <th class="r python th-sub th-sub-python" colspan="2">Python</th>
+    </tr>
+    <tr style="font-size:.55rem">
+      <th></th><th></th>
+      <th class="r go"></th><th class="r go"></th>
+      <th class="r rust">Warm</th><th class="r rust">Cold</th>
+      <th class="r python">Warm</th><th class="r python">Cold</th>
+      <th class="r">vs Rust</th><th class="r">vs Python</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for cat in categories %}
+      {{ summary_row(cat) }}
+    {% endfor %}
+  </tbody>
+</table>
+
+{# ── Per-fixture results ── #}
+<h2>Per-Fixture Results</h2>
+<p style="color:#8b949e;font-size:.8rem;margin-bottom:.8rem">Click any row to see input and output from all three implementations.</p>
+
+<div class="filters">
+  <button class="fbtn on" onclick="filt('all',this)">All ({{ total }})</button>
+  <button class="fbtn" onclick="filt('pass',this)">Pass ({{ passed }})</button>
+  <button class="fbtn" onclick="filt('fail',this)">Fail ({{ failed }})</button>
+  <button class="fbtn" onclick="filt('skip',this)">Skip ({{ skipped }})</button>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th rowspan="2"></th><th rowspan="2">Fixture</th><th rowspan="2">Compared to</th>
+      <th colspan="3" class="th-group th-group-gh">goheadroom</th>
+      <th colspan="6" class="th-group th-group-hr">headroom</th>
+      <th colspan="2" rowspan="2" style="text-align:center;font-size:.65rem;border-bottom:1px solid #30363d">Comparison</th>
+    </tr>
+    <tr>
+      <th class="r go" style="font-size:.6rem">Bytes</th>
+      <th class="r go" style="font-size:.6rem">Warm</th>
+      <th class="r go" style="font-size:.6rem">Cold</th>
+      <th class="r rust th-sub th-sub-rust">Bytes</th>
+      <th class="r rust th-sub th-sub-rust">Warm</th>
+      <th class="r rust th-sub th-sub-rust">Cold</th>
+      <th class="r python th-sub th-sub-python">Bytes</th>
+      <th class="r python th-sub th-sub-python">Warm</th>
+      <th class="r python th-sub th-sub-python">Cold</th>
+      <th class="r" style="font-size:.6rem">vs Rust</th>
+      <th class="r" style="font-size:.6rem">vs Python</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for cat in categories %}
+      {{ category_header(cat) }}
+      {% for e in cat.entries %}
+        {{ fixture_row(e) }}
+      {% endfor %}
+    {% endfor %}
+  </tbody>
+</table>
+
+</div>
+
+<script>
+document.querySelectorAll('thead').forEach(thead => {
+  const rows = thead.querySelectorAll('tr');
+  let top = 0;
+  rows.forEach(r => {
+    r.querySelectorAll('th').forEach(th => { th.style.top = top + 'px' });
+    top += r.offsetHeight;
+  });
+});
+
+function filt(f, btn) {
+  document.querySelectorAll('.fbtn').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  document.querySelectorAll('.fix-row').forEach(r => {
+    const s = r.dataset.status;
+    if (f === 'all') r.classList.remove('fhide');
+    else if (f === 'pass') r.classList.toggle('fhide', s !== 'pass');
+    else if (f === 'fail') r.classList.toggle('fhide', s !== 'fail');
+    else if (f === 'skip') r.classList.toggle('fhide', !['both_skip','go_error','rust_error'].includes(s));
+  });
+  document.querySelectorAll('.detail-row').forEach(r => r.classList.add('hidden'));
+}
+
+function toggleDetail(id) {
+  const r = document.getElementById('detail_' + id);
+  if (r) r.classList.toggle('hidden');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,121 @@
+{#- Reusable macros for repeated patterns -#}
+
+{% macro status_icon(status) -%}
+  {%- if status == "pass" -%}
+    <span style="color:#3fb950">&#10003;</span>
+  {%- elif status == "fail" -%}
+    <span style="color:#f85149">&#10007;</span>
+  {%- elif status in ("both_skip", "go_error", "rust_error") -%}
+    <span style="color:#8b949e">&#8212;</span>
+  {%- else -%}
+    <span style="color:#8b949e">?</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro fmt_us(us) -%}
+  {%- if us == 0 -%}-
+  {%- elif us >= 1000 -%}{{ "%.1f"|format(us / 1000) }}ms
+  {%- else -%}{{ "%.0f"|format(us) }}us
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro fmt_ratio(go_val, other_val) -%}
+  {%- if go_val <= 0 or other_val <= 0 -%}
+    <span style="color:#8b949e">-</span>
+  {%- else -%}
+    {%- set ratio = other_val / go_val -%}
+    {%- if ratio >= 1.0 -%}
+      <span style="color:#3fb950">{{ "%.1f"|format(ratio) }}x faster</span>
+    {%- else -%}
+      <span style="color:#f85149">{{ "%.1f"|format(1 / ratio) }}x slower</span>
+    {%- endif -%}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro parity_badge(n_pass, n_total) -%}
+  {%- if n_pass == n_total -%}
+    <span style="color:#3fb950">{{ n_pass }}/{{ n_total }}</span>
+  {%- else -%}
+    <span style="color:#f85149">{{ n_pass }}/{{ n_total }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{#- Summary table row -#}
+{% macro summary_row(cat) %}
+<tr>
+  <td><strong>{{ cat.name }}</strong></td>
+  <td class="mono r">{{ parity_badge(cat.n_pass, cat.n_total) }}</td>
+  <td class="mono r go">{{ fmt_us(cat.go_warm_avg) }}</td>
+  <td class="mono r go">{{ "%.1f"|format(cat.go_cold_avg) }}ms</td>
+  <td class="mono r rust">{{ fmt_us(cat.rust_warm_avg) }}</td>
+  <td class="mono r rust">{{ "%.1f"|format(cat.rust_cold_avg) }}ms</td>
+  <td class="mono r python">{{ fmt_us(cat.python_warm_avg) }}</td>
+  <td class="mono r python">{{ "%.1f"|format(cat.python_cold_avg) }}ms</td>
+  <td class="mono r">{{ fmt_ratio(cat.go_warm_avg, cat.rust_warm_avg) }}</td>
+  <td class="mono r">{{ fmt_ratio(cat.go_warm_avg, cat.python_warm_avg) }}</td>
+</tr>
+{% endmacro %}
+
+{#- Per-fixture result row -#}
+{% macro fixture_row(e) %}
+{%- set detail_id = e.fixture | replace(".", "_") -%}
+<tr class="fix-row toggle" data-status="{{ e.status }}" onclick="toggleDetail('{{ detail_id }}')">
+  <td>{{ status_icon(e.status) }}</td>
+  <td class="mono fname">{{ e.fixture[:40] }}</td>
+  <td class="mono" style="font-size:.65rem;color:#8b949e">{{ e.compared_to }}</td>
+  <td class="ghcol mono r">{{ e.go_bytes }}</td>
+  <td class="ghcol mono r go">{{ fmt_us(e.go_warm_us) }}</td>
+  <td class="ghcol mono r go">{{ "%.1f"|format(e.go_ms) }}ms</td>
+  <td class="hrcol mono r">{{ e.rust_bytes }}</td>
+  <td class="hrcol mono r rust">{{ fmt_us(e.rust_warm_us) }}</td>
+  <td class="hrcol mono r rust">{{ "%.1f"|format(e.rust_ms) }}ms</td>
+  <td class="hrcol mono r">{{ e.python_bytes }}</td>
+  <td class="hrcol mono r python">{{ fmt_us(e.python_warm_us) }}</td>
+  <td class="hrcol mono r python">{{ "%.1f"|format(e.python_ms) }}ms</td>
+  <td class="mono r">{{ fmt_ratio(e.go_warm_us, e.rust_warm_us) }}</td>
+  <td class="mono r">{{ fmt_ratio(e.go_warm_us, e.python_warm_us) }}</td>
+</tr>
+{{ detail_row(e, detail_id) }}
+{% endmacro %}
+
+{#- Expandable detail row -#}
+{% macro detail_row(e, detail_id) %}
+<tr class="detail-row hidden" id="detail_{{ detail_id }}"><td colspan="{{ ncols }}">
+  <div class="detail-box">
+    <div class="detail-meta">
+      Cold startup:
+      <span class="go">Go {{ "%.1f"|format(e.go_ms) }}ms</span>
+      &middot; <span class="rust">Rust {{ "%.1f"|format(e.rust_ms) }}ms</span>
+      &middot; <span class="python">Python {{ "%.1f"|format(e.python_ms) }}ms</span>
+    </div>
+    <div class="detail-grid">
+      {{ detail_panel("Input", "", e.fixture_input) }}
+      {{ detail_panel("goheadroom output", "go", e.go_out, e.go_bytes) }}
+      {{ detail_panel("Rust output", "rust", e.rust_out, e.rust_bytes) }}
+      {{ detail_panel("Python output", "python", e.python_out, e.python_bytes) }}
+    </div>
+  </div>
+</td></tr>
+{% endmacro %}
+
+{#- Single output panel inside a detail row -#}
+{% macro detail_panel(label, color_class, content, bytes=None) %}
+<div class="detail-panel">
+  <div class="detail-label {{ color_class }}">
+    {{ label }}
+    {%- if bytes is not none %} <span class="detail-bytes">{{ bytes }} bytes</span>{% endif %}
+  </div>
+  <pre class="detail-pre">{{ content[:2000] }}</pre>
+</div>
+{% endmacro %}
+
+{#- Category header row -#}
+{% macro category_header(cat) %}
+{%- set color = "#3fb950" if cat.n_pass == cat.n_total else "#f85149" -%}
+<tr class="cat-row">
+  <td colspan="{{ ncols }}">
+    <strong>{{ cat.name }}</strong>
+    <span style="color:{{ color }};font-size:0.8rem">{{ cat.n_pass }}/{{ cat.n_total }} pass</span>
+  </td>
+</tr>
+{% endmacro %}
