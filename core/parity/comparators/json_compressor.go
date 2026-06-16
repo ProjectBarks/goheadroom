@@ -2,6 +2,7 @@ package comparators
 
 import (
 	"encoding/json"
+	"math"
 
 	"github.com/projectbarks/goheadroom/core/parity"
 	"github.com/projectbarks/goheadroom/core/transforms/jsoncompressor"
@@ -20,10 +21,15 @@ func (JSONCompressor) Run(input, config json.RawMessage) (interface{}, error) {
 	cfg := jsoncompressor.DefaultConfig()
 	result := jsoncompressor.Compress(text, cfg)
 
-	out := map[string]interface{}{
-		"compressed": result.Compressed,
+	ratio := 0.0
+	if len(text) > 0 {
+		ratio = math.Round(float64(len(result.Compressed))/float64(len(text))*10000) / 10000
 	}
-	return out, nil
+
+	return map[string]interface{}{
+		"compressed":         result.Compressed,
+		"preservation_ratio": ratio,
+	}, nil
 }
 
 var _ parity.Comparator = JSONCompressor{}
