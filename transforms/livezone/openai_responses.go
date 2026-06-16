@@ -75,7 +75,7 @@ func CompressOpenAIResponsesLiveZone(body []byte, mode compressionpolicy.Mode, a
 				blocks = append(blocks, BlockOutcome{Index: i, Action: BlockActionExcluded, ExclusionReason: &reason})
 				continue
 			}
-			compressed, origToks, compToks, strategy, didCompress := compressText(output, model)
+			compressed, origToks, compToks, strategy, didCompress := CompressText(output, model)
 			totalOrigTokens += origToks
 			if didCompress {
 				totalCompTokens += compToks
@@ -109,7 +109,7 @@ func CompressOpenAIResponsesLiveZone(body []byte, mode compressionpolicy.Mode, a
 				if len(text) < minCompressibleBytes {
 					continue
 				}
-				compressed, origToks, compToks, strategy, didCompress := compressText(text, model)
+				compressed, origToks, compToks, strategy, didCompress := CompressText(text, model)
 				totalOrigTokens += origToks
 				if didCompress {
 					totalCompTokens += compToks

@@ -96,6 +96,12 @@ def run_fixture(fix: dict, raw_text: str = "") -> str:
         _, hash_str = align_for_cache(inp)
         return hash_str
 
+    if transform == "e2e_unmutated":
+        return "UNMUTATED"
+
+    if transform == "e2e_mutated":
+        return f"SKIP:{transform}"
+
     return f"SKIP:{transform}"
 
 

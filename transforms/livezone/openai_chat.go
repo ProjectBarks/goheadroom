@@ -114,7 +114,7 @@ func CompressOpenAIChatLiveZone(body []byte, mode compressionpolicy.Mode, am aut
 			if len(content) < minCompressibleBytes {
 				continue
 			}
-			compressed, origToks, compToks, strategy, didCompress := compressText(content, model)
+			compressed, origToks, compToks, strategy, didCompress := CompressText(content, model)
 			totalOrigTokens += origToks
 			if didCompress {
 				totalCompTokens += compToks
@@ -137,7 +137,7 @@ func CompressOpenAIChatLiveZone(body []byte, mode compressionpolicy.Mode, am aut
 			if len(content) < minCompressibleBytes {
 				continue
 			}
-			compressed, origToks, compToks, strategy, didCompress := compressText(content, model)
+			compressed, origToks, compToks, strategy, didCompress := CompressText(content, model)
 			totalOrigTokens += origToks
 			if didCompress {
 				totalCompTokens += compToks
@@ -162,7 +162,7 @@ func CompressOpenAIChatLiveZone(body []byte, mode compressionpolicy.Mode, am aut
 				if len(c) < minCompressibleBytes {
 					continue
 				}
-				compressed, origToks, compToks, strategy, didCompress := compressText(c, model)
+				compressed, origToks, compToks, strategy, didCompress := CompressText(c, model)
 				totalOrigTokens += origToks
 				if didCompress {
 					totalCompTokens += compToks
@@ -190,7 +190,7 @@ func CompressOpenAIChatLiveZone(body []byte, mode compressionpolicy.Mode, am aut
 					if len(text) < minCompressibleBytes {
 						continue
 					}
-					compressed, origToks, compToks, strategy, didCompress := compressText(text, model)
+					compressed, origToks, compToks, strategy, didCompress := CompressText(text, model)
 					totalOrigTokens += origToks
 					if didCompress {
 						totalCompTokens += compToks

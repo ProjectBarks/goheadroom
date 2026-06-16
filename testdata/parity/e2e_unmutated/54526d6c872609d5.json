@@ -1,0 +1,11 @@
+{
+  "transform": "e2e_unmutated",
+  "input": "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+  "output": {
+    "mutated": false,
+    "content_type": "diff",
+    "confidence": 1.0,
+    "reason": "below_byte_threshold"
+  },
+  "label": "diff_trivial"
+}

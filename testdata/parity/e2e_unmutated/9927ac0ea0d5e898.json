@@ -1,0 +1,11 @@
+{
+  "transform": "e2e_unmutated",
+  "input": "import os\nimport sys\nimport json\n\ndef process_data(items):\n    results = []\n    for item in items:\n        if item.get('status') == 'active':\n            results.append(item)\n    return results\n\ndef validate_input(data):\n    if not isinstance(data, dict):\n        raise ValueError('Expected dict')\n    required = ['name', 'id', 'type']\n    for key in required:\n        if key not in data:\n            raise KeyError(f'Missing {key}')\n    return True\n\nclass DataProcessor:\n    def __init__(self, config):\n        self.config = config\n        self.cache = {}\n\n    def run(self, items):\n        validated = [x for x in items if validate_input(x)]\n        return process_data(validated)\n",
+  "output": {
+    "mutated": false,
+    "content_type": "source_code",
+    "confidence": 0.6933,
+    "reason": "no_compressor_for_content_type"
+  },
+  "label": "source_code_passthrough"
+}

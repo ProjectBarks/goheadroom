@@ -1,0 +1,11 @@
+{
+  "transform": "e2e_unmutated",
+  "input": "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - b\n",
+  "output": {
+    "mutated": false,
+    "content_type": "text",
+    "confidence": 0.5,
+    "reason": "below_byte_threshold"
+  },
+  "label": "code_below_token_threshold"
+}

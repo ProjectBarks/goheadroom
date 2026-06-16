@@ -1,0 +1,11 @@
+{
+  "transform": "e2e_unmutated",
+  "input": "This is a simple plain text message that doesn't need compression. This is a simple plain text message that doesn't need compression. ",
+  "output": {
+    "mutated": false,
+    "content_type": "text",
+    "confidence": 0.5,
+    "reason": "below_byte_threshold"
+  },
+  "label": "plain_text_below_threshold"
+}

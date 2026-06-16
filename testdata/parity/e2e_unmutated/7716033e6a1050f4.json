@@ -1,0 +1,11 @@
+{
+  "transform": "e2e_unmutated",
+  "input": "[{\"id\": 0, \"name\": \"item_0\", \"status\": \"ok\"}, {\"id\": 1, \"name\": \"item_1\", \"status\": \"ok\"}, {\"id\": 2, \"name\": \"item_2\", \"status\": \"ok\"}]",
+  "output": {
+    "mutated": false,
+    "content_type": "json_array",
+    "confidence": 1.0,
+    "reason": "below_byte_threshold"
+  },
+  "label": "json_array_small"
+}

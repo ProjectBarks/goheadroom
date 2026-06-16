@@ -15,6 +15,7 @@ import (
 	"github.com/uber/goheadroom/transforms/contentdetector"
 	"github.com/uber/goheadroom/transforms/diffcompressor"
 	"github.com/uber/goheadroom/transforms/jsoncompressor"
+	"github.com/uber/goheadroom/transforms/livezone"
 	"github.com/uber/goheadroom/transforms/logcompressor"
 	"github.com/uber/goheadroom/transforms/smartcrusher"
 )
@@ -162,6 +163,28 @@ func makeRunner(fix Fixture) func() string {
 				return input
 			}
 			return codecompressor.Compress(input).Compressed
+		}
+
+	case "e2e_unmutated":
+		var input string
+		json.Unmarshal(fix.Input, &input)
+		return func() string {
+			compressed, _, _, _, ok := livezone.CompressText(input, "gpt-4o")
+			if ok {
+				return "MUTATED:" + compressed[:50]
+			}
+			return "UNMUTATED"
+		}
+
+	case "e2e_mutated":
+		var input string
+		json.Unmarshal(fix.Input, &input)
+		return func() string {
+			compressed, _, _, _, ok := livezone.CompressText(input, "gpt-4o")
+			if !ok {
+				return "NOT_COMPRESSED"
+			}
+			return compressed
 		}
 
 	default:

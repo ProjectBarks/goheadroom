@@ -18,6 +18,7 @@ import (
 	"github.com/uber/goheadroom/transforms/contentdetector"
 	"github.com/uber/goheadroom/transforms/diffcompressor"
 	"github.com/uber/goheadroom/transforms/jsoncompressor"
+	"github.com/uber/goheadroom/transforms/livezone"
 	"github.com/uber/goheadroom/transforms/logcompressor"
 	"github.com/uber/goheadroom/transforms/smartcrusher"
 )
@@ -126,6 +127,10 @@ func processFixture(path string) Result {
 		result = runJSONCompressor(fix, result)
 	case "code_compressor":
 		result = runCodeCompressor(fix, result)
+	case "e2e_unmutated":
+		result = runE2EUnmutated(fix, result)
+	case "e2e_mutated":
+		result = runE2EMutated(fix, result)
 	default:
 		result.Status = "skip"
 		result.Message = fmt.Sprintf("unsupported transform: %s", fix.Transform)
@@ -395,6 +400,69 @@ func runCacheAligner(fix Fixture, r Result) Result {
 		r.Status = "pass"
 	} else {
 		r.Status = "pass"
+	}
+	return r
+}
+
+func runE2EUnmutated(fix Fixture, r Result) Result {
+	var input string
+	json.Unmarshal(fix.Input, &input)
+
+	_, _, _, _, ok := livezone.CompressText(input, "gpt-4o")
+	r.GoOutput = "UNMUTATED"
+	if ok {
+		r.GoOutput = "MUTATED"
+	}
+
+	var expected struct {
+		Mutated bool `json:"mutated"`
+	}
+	json.Unmarshal(fix.Output, &expected)
+
+	if !expected.Mutated && !ok {
+		r.Status = "pass"
+	} else if expected.Mutated && ok {
+		r.Status = "pass"
+	} else {
+		r.Status = "fail"
+		r.Message = fmt.Sprintf("expected mutated=%v, got ok=%v", expected.Mutated, ok)
+	}
+	return r
+}
+
+func runE2EMutated(fix Fixture, r Result) Result {
+	var input string
+	json.Unmarshal(fix.Input, &input)
+
+	compressed, _, _, strategy, ok := livezone.CompressText(input, "gpt-4o")
+	r.GoOutput = compressed
+	r.GoBytes = len(compressed)
+
+	var expected struct {
+		Mutated     bool   `json:"mutated"`
+		ContentType string `json:"content_type"`
+		Strategy    string `json:"strategy"`
+		Compressed  string `json:"compressed"`
+	}
+	json.Unmarshal(fix.Output, &expected)
+
+	if !ok {
+		r.Status = "fail"
+		r.Message = "Go pipeline did not compress (expected mutation)"
+		return r
+	}
+
+	if strategy != expected.Strategy {
+		r.Status = "fail"
+		r.Message = fmt.Sprintf("strategy: go=%s, expected=%s", strategy, expected.Strategy)
+		return r
+	}
+
+	if compressed == expected.Compressed {
+		r.Status = "pass"
+	} else {
+		r.Status = "fail"
+		r.Message = fmt.Sprintf("output mismatch: go=%d bytes, expected=%d bytes", len(compressed), len(expected.Compressed))
 	}
 	return r
 }

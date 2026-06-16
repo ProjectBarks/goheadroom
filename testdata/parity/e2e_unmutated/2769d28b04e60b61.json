@@ -1,0 +1,11 @@
+{
+  "transform": "e2e_unmutated",
+  "input": "{\n  \"users\": [\n    {\n      \"id\": 0,\n      \"name\": \"user_0\"\n    },\n    {\n      \"id\": 1,\n      \"name\": \"user_1\"\n    },\n    {\n      \"id\": 2,\n      \"name\": \"user_2\"\n    },\n    {\n      \"id\": 3,\n      \"name\": \"user_3\"\n    },\n    {\n      \"id\": 4,\n      \"name\": \"user_4\"\n    },\n    {\n      \"id\": 5,\n      \"name\": \"user_5\"\n    },\n    {\n      \"id\": 6,\n      \"name\": \"user_6\"\n    },\n    {\n      \"id\": 7,\n      \"name\": \"user_7\"\n    },\n    {\n      \"id\": 8,\n      \"name\": \"user_8\"\n    },\n    {\n      \"id\": 9,\n      \"name\": \"user_9\"\n    },\n    {\n      \"id\": 10,\n      \"name\": \"user_10\"\n    },\n    {\n      \"id\": 11,\n      \"name\": \"user_11\"\n    },\n    {\n      \"id\": 12,\n      \"name\": \"user_12\"\n    },\n    {\n      \"id\": 13,\n      \"name\": \"user_13\"\n    },\n    {\n      \"id\": 14,\n      \"name\": \"user_14\"\n    },\n    {\n      \"id\": 15,\n      \"name\": \"user_15\"\n    },\n    {\n      \"id\": 16,\n      \"name\": \"user_16\"\n    },\n    {\n      \"id\": 17,\n      \"name\": \"user_17\"\n    },\n    {\n      \"id\": 18,\n      \"name\": \"user_18\"\n    },\n    {\n      \"id\": 19,\n      \"name\": \"user_19\"\n    }\n  ],\n  \"total\": 20,\n  \"page\": 1\n}",
+  "output": {
+    "mutated": false,
+    "content_type": "text",
+    "confidence": 0.5,
+    "reason": "no_compressor_for_content_type"
+  },
+  "label": "json_object_not_array"
+}

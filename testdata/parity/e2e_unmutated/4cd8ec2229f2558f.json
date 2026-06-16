@@ -1,0 +1,11 @@
+{
+  "transform": "e2e_unmutated",
+  "input": "<!DOCTYPE html>\n<html lang=\"en\">\n<head><title>Test Page</title></head>\n<body>\n<h1>Welcome</h1>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n<p>Paragraph content here.</p>\n</body>\n</html>\n",
+  "output": {
+    "mutated": false,
+    "content_type": "html",
+    "confidence": 1.0,
+    "reason": "no_compressor_for_content_type"
+  },
+  "label": "html_passthrough"
+}

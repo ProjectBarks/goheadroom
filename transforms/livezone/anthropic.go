@@ -161,7 +161,7 @@ func CompressAnthropicLiveZone(body []byte, mode compressionpolicy.Mode, am auth
 			}
 
 			for _, slot := range slots {
-				compressed, origToks, compToks, strategy, didCompress := compressText(slot.text, model)
+				compressed, origToks, compToks, strategy, didCompress := CompressText(slot.text, model)
 				totalOrigTokens += origToks
 				if didCompress {
 					totalCompTokens += compToks

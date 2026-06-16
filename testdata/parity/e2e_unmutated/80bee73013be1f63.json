@@ -1,0 +1,11 @@
+{
+  "transform": "e2e_unmutated",
+  "input": "diff --git a/foo.py b/foo.py\nindex abc..def 100644\n--- a/foo.py\n+++ b/foo.py\n@@ -1,3 +1,3 @@\n-old line\n+new line\n context\n",
+  "output": {
+    "mutated": false,
+    "content_type": "diff",
+    "confidence": 1.0,
+    "reason": "below_byte_threshold"
+  },
+  "label": "diff_small"
+}

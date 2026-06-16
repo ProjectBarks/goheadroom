@@ -14,9 +14,9 @@ import (
 // Matches the Rust per-content-type thresholds (all 512).
 const minCompressibleBytes = 512
 
-// compressText runs content-type-aware compression on a text string.
+// CompressText runs content-type-aware compression on a text string.
 // Returns the compressed text, original tokens, compressed tokens, strategy, and whether compression succeeded.
-func compressText(text string, model string) (compressed string, origTokens, compTokens int, strategy string, ok bool) {
+func CompressText(text string, model string) (compressed string, origTokens, compTokens int, strategy string, ok bool) {
 	return compressTextWithCCR(text, model, nil)
 }
 
