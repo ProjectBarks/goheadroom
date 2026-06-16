@@ -21,16 +21,16 @@ scripts/generate-parity-report.py         ← Generates HTML report comparing Go
 - `PYTHON_NATIVE_TRANSFORMS` (content_detector, ccr, cache_aligner, code_compressor,
   json_compressor): Go output is compared against **Python** output.
 - All other transforms: Go output is compared against **Rust** output.
-- Rust bench binary: `/Users/bbarker/headroom-src/target/release/headroom-bench`
+- Rust bench binary: set via `$PARITY_RUST_BIN` or `--rust-bin`, or place `headroom-bench` on `$PATH`
 
 ## Adding a New Transform
 
-1. Add handler to `cmd/bench/main.go` (same switch pattern)
-2. Add handler to `cmd/parity-check/main.go` (same switch pattern)
-3. Add handler to `scripts/python-bench.py`
-4. Generate fixtures: run Rust or Python on test inputs, save as fixture JSON
-5. Run parity-check to verify: `go run ./cmd/parity-check testdata/parity`
-6. Rebuild bench binary and regenerate report
+1. Create a comparator in `core/parity/comparators/<transform>.go` (~20 lines)
+2. Add it to `AllComparators()` in `core/parity/comparators/all.go`
+3. Add handler to `scripts/python-bench.py` (for Python-native transforms)
+4. Generate fixtures: run Rust or Python on test inputs, save as fixture JSON under `core/testdata/parity/<transform>/`
+5. Add a `parity_test.go` in the transform's package (~15 lines calling `parity.RunFixtures`)
+6. Run: `go test ./core/transforms/<pkg>/ -run Parity -v`
 
 ## Fixture Format
 
@@ -49,3 +49,14 @@ scripts/generate-parity-report.py         ← Generates HTML report comparing Go
 - **No normalization.** Comparison is byte-identical (`==`).
 - **Same config everywhere.** bench, parity-check, and production code must use
   identical configuration for each transform.
+
+## Environment Variables
+
+All binary paths are configurable. No hardcoded paths.
+
+| Variable | Flag | Purpose |
+|---|---|---|
+| `$PARITY_GO_BIN` | `--go-bin` | Go parity-check binary |
+| `$PARITY_RUST_BIN` | `--rust-bin` | Rust headroom-bench binary |
+| `$PARITY_PYTHON_BIN` | `--python-bin` | Python bench script |
+| `$PARITY_FIXTURES` | `--fixtures` | Fixtures directory |
