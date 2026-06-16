@@ -3,6 +3,7 @@ package parity
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
@@ -11,6 +12,12 @@ import (
 type Comparator interface {
 	Name() string
 	Run(input, config json.RawMessage) (interface{}, error)
+}
+
+// SequentialComparator is implemented by comparators that need fixtures
+// processed in recorded_at order (e.g. because they maintain state across calls).
+type SequentialComparator interface {
+	Sequential() bool
 }
 
 func DefaultCmpOpts() []cmp.Option {
@@ -50,6 +57,14 @@ func RunComparator(dir string, c Comparator, preprocessors ...Preprocessor) (*Re
 	}
 	report := &Report{Transform: c.Name()}
 	opts := DefaultCmpOpts()
+
+	// If the comparator is sequential (stateful), sort fixtures by recorded_at
+	// so that state-dependent fields (e.g. previous_hash) are computed correctly.
+	if sc, ok := c.(SequentialComparator); ok && sc.Sequential() {
+		sort.SliceStable(fixtures, func(i, j int) bool {
+			return fixtures[i].RecordedAt < fixtures[j].RecordedAt
+		})
+	}
 
 	for _, fix := range fixtures {
 		goResult, err := c.Run(fix.Input, fix.Config)

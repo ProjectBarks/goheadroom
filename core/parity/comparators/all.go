@@ -5,7 +5,7 @@ import "github.com/projectbarks/goheadroom/core/parity"
 // AllComparators returns all parity comparators sorted alphabetically by name.
 func AllComparators() []parity.Comparator {
 	return []parity.Comparator{
-		CacheAligner{},
+		&CacheAligner{},
 		CCR{},
 		CodeCompressor{},
 		ContentDetector{},

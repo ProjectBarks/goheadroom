@@ -8,11 +8,12 @@ import (
 )
 
 type Fixture struct {
-	Name      string          // filename, e.g. "case1.json"
-	Transform string          `json:"transform"`
-	Input     json.RawMessage `json:"input"`
-	Config    json.RawMessage `json:"config"`
-	Output    json.RawMessage `json:"output"`
+	Name       string          // filename, e.g. "case1.json"
+	Transform  string          `json:"transform"`
+	Input      json.RawMessage `json:"input"`
+	Config     json.RawMessage `json:"config"`
+	Output     json.RawMessage `json:"output"`
+	RecordedAt string          `json:"recorded_at"`
 }
 
 func LoadFixtures(dir string) ([]Fixture, error) {
