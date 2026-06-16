@@ -1,0 +1,7 @@
+{
+  "transform": "search_compressor",
+  "input": "app/models.py:12:    def process_1(self, data):\napp/models.py:22:    def process_2(self, data):\napp/models.py:32:    def process_3(self, data):\napp/models.py:42:    def process_4(self, data):\napp/views.py:12:    def process_1(self, data):\napp/views.py:22:    def process_2(self, data):\napp/views.py:32:    def process_3(self, data):\napp/views.py:42:    def process_4(self, data):\napp/utils.py:12:    def process_1(self, data):\napp/utils.py:22:    def process_2(self, data):\napp/utils.py:32:    def process_3(self, data):\napp/utils.py:42:    def process_4(self, data):\n",
+  "output": {
+    "compressed": "app/models.py:12:    def process_1(self, data):\napp/models.py:22:    def process_2(self, data):\napp/models.py:32:    def process_3(self, data):\napp/models.py:42:    def process_4(self, data):\napp/utils.py:12:    def process_1(self, data):\napp/utils.py:42:    def process_4(self, data):\n[... and 2 more matches in app/utils.py]\n[12 matches compressed to 6. Retrieve more: hash=f579151de63a255340e57aae]"
+  }
+}

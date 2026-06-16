@@ -1,0 +1,7 @@
+{
+  "transform": "search_compressor",
+  "input": "README.md:1:# My Project\nREADME.md:3:A simple tool.\n",
+  "output": {
+    "compressed": "README.md:1:# My Project\nREADME.md:3:A simple tool."
+  }
+}

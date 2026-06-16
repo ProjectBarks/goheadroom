@@ -1,0 +1,7 @@
+{
+  "transform": "search_compressor",
+  "input": "server/main.go:10:func startServer(port int) error {\nserver/main.go:11:\tlog.Printf(\"Starting server on :%d\", port)\nserver/main.go:12:\treturn http.ListenAndServe(fmt.Sprintf(\":%d\", port), nil)\n--\nserver/main.go:45:func handleRequest(w http.ResponseWriter, r *http.Request) {\nserver/main.go:46:\tlog.Printf(\"Handling %s %s\", r.Method, r.URL.Path)\n--\nserver/handler.go:20:func processPayload(data []byte) (Result, error) {\nserver/handler.go:21:\tvar req Request\nserver/handler.go:22:\tif err := json.Unmarshal(data, &req); err != nil {\nserver/handler.go:23:\t\treturn Result{}, fmt.Errorf(\"unmarshal: %w\", err)\n--\nserver/handler.go:55:func validateInput(req Request) error {\nserver/handler.go:56:\tif req.Name == \"\" {\nserver/handler.go:57:\t\treturn errors.New(\"name is required\")\n",
+  "output": {
+    "compressed": "server/handler.go:20:func processPayload(data []byte) (Result, error) {\nserver/handler.go:21:\tvar req Request\nserver/handler.go:22:\tif err := json.Unmarshal(data, &req); err != nil {\nserver/handler.go:55:func validateInput(req Request) error {\nserver/handler.go:57:\t\treturn errors.New(\"name is required\")\n[... and 2 more matches in server/handler.go]\n[12 matches compressed to 5. Retrieve more: hash=dec1b0c101cd76b076a4e9cb]"
+  }
+}

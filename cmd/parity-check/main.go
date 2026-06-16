@@ -1,3 +1,7 @@
+// parity-check validates Go transform output against fixture-stored SOT (Source of Truth).
+// Comparison is byte-identical (==). No normalization, no EqualFold, no SKIP.
+// If Go output doesn't match SOT, the status is "fail", never "skip".
+// See docs/parity-testing.md for the full testing architecture.
 package main
 
 import (
@@ -17,6 +21,7 @@ import (
 	"github.com/uber/goheadroom/transforms/jsoncompressor"
 	"github.com/uber/goheadroom/transforms/livezone"
 	"github.com/uber/goheadroom/transforms/logcompressor"
+	"github.com/uber/goheadroom/transforms/searchcompressor"
 	"github.com/uber/goheadroom/transforms/smartcrusher"
 )
 
@@ -124,6 +129,8 @@ func processFixture(path string) Result {
 		result = runJSONCompressor(fix, result)
 	case "code_compressor":
 		result = runCodeCompressor(fix, result)
+	case "search_compressor":
+		result = runSearchCompressor(fix, result)
 	case "e2e_unmutated":
 		result = runE2EUnmutated(fix, result)
 	case "e2e_mutated":
@@ -382,6 +389,28 @@ func runCacheAligner(fix Fixture, r Result) Result {
 	} else {
 		r.Status = "fail"
 		r.Message = fmt.Sprintf("hash mismatch: go=%s, expected=%s", goHash, output.BenchHash)
+	}
+	return r
+}
+
+func runSearchCompressor(fix Fixture, r Result) Result {
+	var input string
+	json.Unmarshal(fix.Input, &input)
+	sc := searchcompressor.New(searchcompressor.DefaultConfig())
+	res, _ := sc.Compress(input, "", 0.0)
+	r.GoOutput = res.Compressed
+	r.GoBytes = len(res.Compressed)
+
+	var expected struct {
+		Compressed string `json:"compressed"`
+	}
+	json.Unmarshal(fix.Output, &expected)
+
+	if res.Compressed == expected.Compressed {
+		r.Status = "pass"
+	} else {
+		r.Status = "fail"
+		r.Message = fmt.Sprintf("output mismatch: go=%d bytes, expected=%d bytes", len(res.Compressed), len(expected.Compressed))
 	}
 	return r
 }

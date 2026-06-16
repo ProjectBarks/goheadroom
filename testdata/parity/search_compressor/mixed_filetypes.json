@@ -1,0 +1,7 @@
+{
+  "transform": "search_compressor",
+  "input": "src/handler.py:15:    result = process(data_1)\nsrc/handler.py:30:    result = process(data_2)\nsrc/handler.py:45:    result = process(data_3)\npkg/server/server.go:20:\tfmt.Println(\"processing\", item1)\npkg/server/server.go:40:\tfmt.Println(\"processing\", item2)\npkg/server/server.go:60:\tfmt.Println(\"processing\", item3)\nsrc/components/App.jsx:8:  const handle1 = () => { processData(1); }\nsrc/components/App.jsx:16:  const handle2 = () => { processData(2); }\nsrc/components/App.jsx:24:  const handle3 = () => { processData(3); }\nconfig/settings.yaml:5:  process_timeout: 30\nconfig/settings.yaml:12:  max_retries: 3\n",
+  "output": {
+    "compressed": "config/settings.yaml:5:  process_timeout: 30\nconfig/settings.yaml:12:  max_retries: 3\npkg/server/server.go:20:\tfmt.Println(\"processing\", item1)\npkg/server/server.go:40:\tfmt.Println(\"processing\", item2)\npkg/server/server.go:60:\tfmt.Println(\"processing\", item3)\n[11 matches compressed to 5. Retrieve more: hash=3a351b604b4276f1bf870af5]"
+  }
+}

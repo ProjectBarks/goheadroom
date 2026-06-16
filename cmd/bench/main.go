@@ -1,3 +1,8 @@
+// bench runs a single parity fixture through the Go transform and prints the output.
+// Used by generate-parity-report.py for live Go-vs-Python/Rust comparison.
+// Every transform handler must use the same config as cmd/parity-check and
+// transforms/livezone/compress.go. No SKIP — every transform must produce real output.
+// See docs/parity-testing.md for the full testing architecture.
 package main
 
 import (
@@ -16,6 +21,7 @@ import (
 	"github.com/uber/goheadroom/transforms/jsoncompressor"
 	"github.com/uber/goheadroom/transforms/livezone"
 	"github.com/uber/goheadroom/transforms/logcompressor"
+	"github.com/uber/goheadroom/transforms/searchcompressor"
 	"github.com/uber/goheadroom/transforms/smartcrusher"
 )
 
@@ -150,6 +156,15 @@ func makeRunner(fix Fixture) func() string {
 		json.Unmarshal(fix.Input, &input)
 		return func() string {
 			return codecompressor.Compress(input).Compressed
+		}
+
+	case "search_compressor":
+		var input string
+		json.Unmarshal(fix.Input, &input)
+		sc := searchcompressor.New(searchcompressor.DefaultConfig())
+		return func() string {
+			r, _ := sc.Compress(input, "", 0.0)
+			return r.Compressed
 		}
 
 	case "e2e_unmutated":

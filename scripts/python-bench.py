@@ -32,6 +32,61 @@ def _make_config(cls, config: dict):
     return cls(**kwargs)
 
 
+def _e2e_compress(text: str):
+    """Replicate Go's livezone.CompressText routing.
+
+    Returns compressed text if compression succeeded and saved tokens,
+    or None if no compression was applied.
+    """
+    MIN_COMPRESSIBLE_BYTES = 512
+
+    if len(text) < MIN_COMPRESSIBLE_BYTES:
+        return None
+
+    result = _detect_content_type(text)
+    ct = result.content_type.value
+
+    compressed_text = None
+
+    if ct == "json_array":
+        sc = SmartCrusher()
+        cr = sc.crush(text)
+        if cr.was_modified:
+            compressed_text = cr.compressed
+    elif ct == "build":
+        lc = LogCompressor()
+        lr = lc.compress(text)
+        if lr.compressed != text:
+            compressed_text = lr.compressed
+    elif ct == "search":
+        from headroom.transforms.search_compressor import SearchCompressor
+        sc = SearchCompressor()
+        sr = sc.compress(text)
+        if sr.compressed != text:
+            compressed_text = sr.compressed
+    elif ct == "diff":
+        dc = DiffCompressor()
+        dr = dc.compress(text)
+        if dr.compressed != text:
+            compressed_text = dr.compressed
+    else:
+        # PlainText, SourceCode, Html - no compressor available
+        return None
+
+    if compressed_text is None:
+        return None
+
+    # Token-validated rejection gate: accept only when compressed tokens < original
+    from headroom.providers.openai import OpenAITokenCounter
+    tok = OpenAITokenCounter("gpt-4o")
+    orig_tokens = tok.count_text(text)
+    comp_tokens = tok.count_text(compressed_text)
+    if comp_tokens >= orig_tokens:
+        return None
+
+    return compressed_text
+
+
 def run_fixture(fix: dict, raw_text: str = "") -> str:
     """Run the appropriate Python transform on a fixture and return output."""
     transform = fix["transform"]
@@ -97,10 +152,16 @@ def run_fixture(fix: dict, raw_text: str = "") -> str:
         return hash_str
 
     if transform == "e2e_unmutated":
-        return f"SKIP:{transform}"
+        compressed = _e2e_compress(inp)
+        if compressed is None or compressed == inp:
+            return "UNMUTATED"
+        return "MUTATED:" + compressed[:50]
 
     if transform == "e2e_mutated":
-        return f"SKIP:{transform}"
+        compressed = _e2e_compress(inp)
+        if compressed is None or compressed == inp:
+            return "NOT_COMPRESSED"
+        return compressed
 
     return f"SKIP:{transform}"
 

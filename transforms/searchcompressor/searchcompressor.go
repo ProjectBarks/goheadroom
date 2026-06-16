@@ -335,7 +335,11 @@ func (sc *SearchCompressor) selectMatches(files map[string]*FileMatches, bias fl
 		sorted = append(sorted, fileEntry{name, fm})
 	}
 	sort.SliceStable(sorted, func(i, j int) bool {
-		return sorted[i].fm.TotalScore() > sorted[j].fm.TotalScore()
+		si, sj := sorted[i].fm.TotalScore(), sorted[j].fm.TotalScore()
+		if si != sj {
+			return si > sj
+		}
+		return sorted[i].name < sorted[j].name // deterministic tiebreak
 	})
 
 	if len(sorted) > sc.config.MaxFiles {

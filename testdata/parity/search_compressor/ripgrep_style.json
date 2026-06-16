@@ -1,0 +1,7 @@
+{
+  "transform": "search_compressor",
+  "input": "src/auth/token.rs:15:5:    pub fn validate(&self) -> Result<Claims, TokenError> {\nsrc/auth/token.rs:16:9:        let decoded = decode(&self.raw, &self.key)?;\nsrc/auth/token.rs:22:9:        if decoded.exp < Utc::now().timestamp() {\nsrc/auth/token.rs:23:13:            return Err(TokenError::Expired);\nsrc/auth/middleware.rs:8:5:    pub async fn authenticate(req: &Request) -> Result<User, AuthError> {\nsrc/auth/middleware.rs:12:9:        let token = req.headers().get(\"Authorization\")\nsrc/auth/middleware.rs:15:9:        match Token::new(token).validate() {\nsrc/auth/middleware.rs:16:13:            Ok(claims) => Ok(User::from(claims)),\nsrc/auth/middleware.rs:17:13:            Err(e) => Err(AuthError::InvalidToken(e)),\n",
+  "output": {
+    "compressed": "src/auth/middleware.rs:8:5:    pub async fn authenticate(req: &Request) -> Result<User, AuthError> {\nsrc/auth/middleware.rs:12:9:        let token = req.headers().get(\"Authorization\")\nsrc/auth/middleware.rs:15:9:        match Token::new(token).validate() {\nsrc/auth/middleware.rs:16:13:            Ok(claims) => Ok(User::from(claims)),\nsrc/auth/middleware.rs:17:13:            Err(e) => Err(AuthError::InvalidToken(e)),"
+  }
+}
