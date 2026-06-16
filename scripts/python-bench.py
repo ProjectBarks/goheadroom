@@ -151,6 +151,11 @@ def run_fixture(fix: dict, raw_text: str = "") -> str:
         _, hash_str = align_for_cache(inp)
         return hash_str
 
+    if transform == "search_compressor":
+        from headroom.transforms.search_compressor import SearchCompressor
+        sc = SearchCompressor()
+        return sc.compress(inp).compressed
+
     if transform == "e2e_unmutated":
         compressed = _e2e_compress(inp)
         if compressed is None or compressed == inp:

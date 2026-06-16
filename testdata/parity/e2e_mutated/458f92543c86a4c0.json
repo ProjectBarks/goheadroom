@@ -5,7 +5,7 @@
     "mutated": true,
     "content_type": "build",
     "strategy": "log_compressor",
-    "compressed": "============================================================\nFAILED tests session starts\n============================================================\nplatform linux -- Python 3.11.5, pytest-7.4.0\ncollected 50 items\n\ntests/test_module.py::test_case_42 PASSED\ntests/test_module.py::test_case_45 FAILED\n============================================================\nE       AssertionError: assert {'status': 'error'} == {'status': 'ok'}\n============================================================\n1 failed, 45 passed in 3.21s\n[54 lines omitted: 1 ERROR, 3 FAIL]"
+    "compressed": "============================================================\nFAILED tests session starts\n============================================================\nplatform linux -- Python 3.11.5, pytest-7.4.0\ncollected 50 items\n\ntests/test_module.py::test_case_42 PASSED\ntests/test_module.py::test_case_43 PASSED\ntests/test_module.py::test_case_44 PASSED\ntests/test_module.py::test_case_45 FAILED\n\nFAILURES\n============================================================\n_ test_case_45 _\n\n    def test_case_45():\n        result = process(data)\n>       assert result == expected\nE       AssertionError: assert {'status': 'error'} == {'status': 'ok'}\n\ntests/test_module.py:123: AssertionError\n============================================================\n1 failed, 45 passed in 3.21s\n\n[42 lines omitted: 1 ERROR, 3 FAIL]\n[66 lines compressed to 24. Retrieve more: hash=b94629f9064854fdd9db55d4]"
   },
   "label": "pytest_output"
 }

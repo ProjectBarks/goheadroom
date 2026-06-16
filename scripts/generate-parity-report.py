@@ -15,7 +15,7 @@ from collections import defaultdict
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 
-PYTHON_NATIVE_TRANSFORMS = {"content_detector", "ccr", "cache_aligner", "code_compressor", "json_compressor"}
+PYTHON_NATIVE_TRANSFORMS = {"content_detector", "ccr", "cache_aligner", "code_compressor", "json_compressor", "search_compressor", "e2e_unmutated", "e2e_mutated"}
 
 def parse_args():
     p = argparse.ArgumentParser(description="Generate goheadroom parity report")

@@ -2,6 +2,6 @@
   "transform": "search_compressor",
   "input": "docker-compose.yml:5:  db:\ndocker-compose.yml:6:    image: postgres:15\ndocker-compose.yml:10:  redis:\ndocker-compose.yml:11:    image: redis:7-alpine\nMakefile:15:build:\nMakefile:16:\tgo build -o bin/server ./cmd/server\nMakefile:20:test:\nMakefile:21:\tgo test ./...\n.github/workflows/ci.yml:12:    - run: go test ./...\n.github/workflows/ci.yml:15:    - run: go build ./...\nterraform/main.tf:8:  instance_type = \"t3.medium\"\nterraform/main.tf:12:  ami = \"ami-0123456789abcdef0\"\n",
   "output": {
-    "compressed": ".github/workflows/ci.yml:12:    - run: go test ./...\n.github/workflows/ci.yml:15:    - run: go build ./...\nMakefile:15:build:\nMakefile:16:\tgo build -o bin/server ./cmd/server\nMakefile:21:\tgo test ./...\n[... and 1 more matches in Makefile]\n[12 matches compressed to 5. Retrieve more: hash=ebc96e2d75e9aea0cc5c3404]"
+    "compressed": ".github/workflows/ci.yml:12:    - run: go test ./...\n.github/workflows/ci.yml:15:    - run: go build ./...\nMakefile:15:build:\nMakefile:16:\tgo build -o bin/server ./cmd/server\nMakefile:20:test:\nMakefile:21:\tgo test ./...\ndocker-compose.yml:5:  db:\ndocker-compose.yml:6:    image: postgres:15\ndocker-compose.yml:10:  redis:\ndocker-compose.yml:11:    image: redis:7-alpine\nterraform/main.tf:8:  instance_type = \"t3.medium\"\nterraform/main.tf:12:  ami = \"ami-0123456789abcdef0\""
   }
 }
