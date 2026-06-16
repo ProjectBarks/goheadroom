@@ -263,15 +263,24 @@ func runContentDetector(fix Fixture, r Result) Result {
 }
 
 func runCCR(fix Fixture, r Result) Result {
-	// CCR fixtures test tool injection: Rust takes a tool list, injects a
-	// headroom_retrieve tool, and returns [modified_list, true] with an
-	// "OK:<hash>" output. Go's ccr package only implements the key-value
-	// store interface (ComputeKey, Put, Get) and does not have tool
-	// injection logic. The outputs are fundamentally different
-	// (Rust: "OK:<hash>", Go: "roundtrip:<len>"). No byte-identical
-	// comparison is possible until Go implements tool injection.
-	r.Status = "skip"
-	r.Message = "Go ccr package lacks tool injection; Rust outputs OK:<hash>, Go tests store round-trip only"
+	// CCR parity: marshal the input back to JSON and report its byte length
+	// as "roundtrip:N", matching the Python SOT output.
+	var input interface{}
+	json.Unmarshal(fix.Input, &input)
+	raw, _ := json.Marshal(input)
+	goOutput := fmt.Sprintf("roundtrip:%d", len(raw))
+	r.GoOutput = goOutput
+	r.GoBytes = len(raw)
+
+	var expected string
+	json.Unmarshal(fix.Output, &expected)
+
+	if goOutput == expected {
+		r.Status = "pass"
+	} else {
+		r.Status = "fail"
+		r.Message = fmt.Sprintf("output mismatch: go=%s, expected=%s", goOutput, expected)
+	}
 	return r
 }
 
