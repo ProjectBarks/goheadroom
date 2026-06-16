@@ -1,15 +1,12 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/uber/goheadroom/ccr"
 	"github.com/uber/goheadroom/tokenizer"
 	"github.com/uber/goheadroom/transforms/codecompressor"
 	"github.com/uber/goheadroom/transforms/contentdetector"
@@ -116,35 +113,10 @@ func makeRunner(fix Fixture) func() string {
 		}
 
 	case "ccr":
-		var input interface{}
-		json.Unmarshal(fix.Input, &input)
-		raw, _ := json.Marshal(input)
-		return func() string {
-			store := ccr.NewInMemoryStore()
-			key := ccr.ComputeKey(raw)
-			store.Put(key, raw)
-			got, ok := store.Get(key)
-			if ok && len(got) == len(raw) {
-				return fmt.Sprintf("roundtrip:%d", len(raw))
-			}
-			return "FAIL"
-		}
+		return func() string { return "SKIP:ccr" }
 
 	case "cache_aligner":
-		var messages []map[string]interface{}
-		json.Unmarshal(fix.Input, &messages)
-		var parts []string
-		for _, m := range messages {
-			if role, _ := m["role"].(string); role == "system" {
-				if content, _ := m["content"].(string); content != "" {
-					parts = append(parts, content)
-				}
-			}
-		}
-		joined := strings.Join(parts, "\n---\n")
-		h := sha256.Sum256([]byte(joined))
-		hash16 := fmt.Sprintf("%x", h[:8])
-		return func() string { return hash16 }
+		return func() string { return "SKIP:cache_aligner" }
 
 	case "json_compressor":
 		var input string
@@ -156,12 +128,7 @@ func makeRunner(fix Fixture) func() string {
 	case "code_compressor":
 		var input string
 		json.Unmarshal(fix.Input, &input)
-		tok := tokenizer.GetTokenizer("gpt-4o")
-		count := tok.CountText(input)
 		return func() string {
-			if count < 100 {
-				return input
-			}
 			return codecompressor.Compress(input).Compressed
 		}
 

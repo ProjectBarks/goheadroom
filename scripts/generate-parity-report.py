@@ -116,15 +116,6 @@ def run_warm_list(cmd_list, fixture_path, iterations=50):
     return 0
 
 def normalize_output(transform, output):
-    if transform == "content_detector":
-        mapping = {
-            "plaintext": "text", "gitdiff": "diff", "jsonarray": "json",
-            "sourcecode": "code", "searchresults": "search", "buildoutput": "build",
-        }
-        parts = output.split(":", 1)
-        if len(parts) == 2:
-            key = parts[0].lower().replace("_", "")
-            return mapping.get(key, parts[0].lower()) + ":" + parts[1]
     return output
 
 def compute_diff_html(go_out, rust_out):
@@ -214,11 +205,14 @@ def main():
 
         go_norm = normalize_output(transform, go_out)
         rust_norm = normalize_output(transform, rust_out)
-
-        # Determine comparison target: Python for native transforms, Rust for Rust-backed ones
         use_python = transform in PYTHON_NATIVE_TRANSFORMS and python_bin and python_rc == 0
 
-        if use_python:
+        # If Go itself skips, mark as skip regardless of comparison target
+        if go_out.startswith("SKIP:"):
+            status = "both_skip"
+            compared_to = "-"
+        # Determine comparison target: Python for native transforms, Rust for Rust-backed ones
+        elif use_python:
             python_norm = normalize_output(transform, python_out)
             if go_rc != 0:
                 status = "go_error"

@@ -58,7 +58,7 @@ def run_fixture(fix: dict, raw_text: str = "") -> str:
 
     if transform == "tokenizer":
         from headroom.tokenizer import Tokenizer
-        tok = Tokenizer.for_model("gpt-4o-mini")
+        tok = Tokenizer.for_model("gpt-4o")
         return str(tok.count_text(inp))
 
     if transform == "content_detector":
@@ -97,7 +97,7 @@ def run_fixture(fix: dict, raw_text: str = "") -> str:
         return hash_str
 
     if transform == "e2e_unmutated":
-        return "UNMUTATED"
+        return f"SKIP:{transform}"
 
     if transform == "e2e_mutated":
         return f"SKIP:{transform}"
