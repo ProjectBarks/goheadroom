@@ -163,7 +163,7 @@ func makeRunner(fix Fixture) func() string {
 		json.Unmarshal(fix.Input, &input)
 		sc := searchcompressor.New(searchcompressor.DefaultConfig())
 		return func() string {
-			r, _ := sc.Compress(input, "", 0.0)
+			r, _ := sc.Compress(input, "", 1.0)
 			return r.Compressed
 		}
 

@@ -397,7 +397,7 @@ func runSearchCompressor(fix Fixture, r Result) Result {
 	var input string
 	json.Unmarshal(fix.Input, &input)
 	sc := searchcompressor.New(searchcompressor.DefaultConfig())
-	res, _ := sc.Compress(input, "", 0.0)
+	res, _ := sc.Compress(input, "", 1.0)
 	r.GoOutput = res.Compressed
 	r.GoBytes = len(res.Compressed)
 

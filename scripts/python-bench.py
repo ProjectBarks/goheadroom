@@ -55,13 +55,13 @@ def _e2e_compress(text: str):
             compressed_text = cr.compressed
     elif ct == "build":
         lc = LogCompressor()
-        lr = lc.compress(text)
+        lr = lc.compress(text, bias=0.0)
         if lr.compressed != text:
             compressed_text = lr.compressed
     elif ct == "search":
         from headroom.transforms.search_compressor import SearchCompressor
         sc = SearchCompressor()
-        sr = sc.compress(text)
+        sr = sc.compress(text, bias=0.0)
         if sr.compressed != text:
             compressed_text = sr.compressed
     elif ct == "diff":
