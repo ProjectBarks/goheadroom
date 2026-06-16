@@ -23,9 +23,16 @@ func (E2EUnmutated) Run(input, config json.RawMessage) (interface{}, error) {
 	_, _, _, _, ok := livezone.CompressText(text, "gpt-4o")
 	ct := contentdetector.DetectContentType(text)
 
+	reason := "no_compressor_for_content_type"
+	if len(text) < 512 {
+		reason = "below_byte_threshold"
+	}
+
 	out := map[string]interface{}{
 		"mutated":      ok,
 		"content_type": ct.ContentType.String(),
+		"confidence":   ct.Confidence,
+		"reason":       reason,
 	}
 	return out, nil
 }
