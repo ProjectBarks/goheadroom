@@ -14,15 +14,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uber/goheadroom/tokenizer"
-	"github.com/uber/goheadroom/transforms/codecompressor"
-	"github.com/uber/goheadroom/transforms/contentdetector"
-	"github.com/uber/goheadroom/transforms/diffcompressor"
-	"github.com/uber/goheadroom/transforms/jsoncompressor"
-	"github.com/uber/goheadroom/transforms/livezone"
-	"github.com/uber/goheadroom/transforms/logcompressor"
-	"github.com/uber/goheadroom/transforms/searchcompressor"
-	"github.com/uber/goheadroom/transforms/smartcrusher"
+	"github.com/projectbarks/goheadroom/core/tokenizer"
+	"github.com/projectbarks/goheadroom/core/transforms/codecompressor"
+	"github.com/projectbarks/goheadroom/core/transforms/contentdetector"
+	"github.com/projectbarks/goheadroom/core/transforms/diffcompressor"
+	"github.com/projectbarks/goheadroom/core/transforms/jsoncompressor"
+	"github.com/projectbarks/goheadroom/core/transforms/livezone"
+	"github.com/projectbarks/goheadroom/core/transforms/logcompressor"
+	"github.com/projectbarks/goheadroom/core/transforms/searchcompressor"
+	"github.com/projectbarks/goheadroom/core/transforms/smartcrusher"
 )
 
 type Fixture struct {

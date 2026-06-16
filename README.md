@@ -129,8 +129,8 @@ Uses a **Compress-Cache-Retrieve (CCR)** architecture: content is compressed inl
 
 ```go
 import (
-    "github.com/uber/goheadroom"
-    "github.com/uber/goheadroom/compressionpolicy"
+    "github.com/projectbarks/goheadroom/core"
+    "github.com/projectbarks/goheadroom/core/compressionpolicy"
 )
 
 resp, err := headroom.CompressLiveZone(headroom.CompressRequest{

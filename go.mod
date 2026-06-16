@@ -1,4 +1,4 @@
-module github.com/uber/goheadroom
+module github.com/projectbarks/goheadroom
 
 go 1.25.1
 
