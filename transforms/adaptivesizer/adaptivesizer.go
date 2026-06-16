@@ -15,6 +15,8 @@ package adaptivesizer
 import (
 	"bytes"
 	"compress/flate"
+	"crypto/md5"
+	"encoding/binary"
 	"io"
 	"math"
 	"math/bits"
@@ -267,7 +269,8 @@ func isASCII(s string) bool {
 // Algorithm:
 //  1. Iterate character 4-grams (sliding window). For input shorter
 //     than 4 chars, the loop runs once with the entire string.
-//  2. Hash each gram with FNV-1a 64-bit.
+//  2. Hash each gram with MD5; take first 8 bytes as big-endian u64
+//     (matches Rust/Python parity).
 //  3. Per-bit voting: +1 if set, -1 if clear.
 //  4. Final bit j is set iff votes[j] > 0 (strict).
 func Simhash(text string) uint64 {
@@ -280,7 +283,8 @@ func Simhash(text string) uint64 {
 }
 
 // simhashASCII handles the common case where text is pure ASCII.
-// Pre-lowercases once, then hashes 4-byte grams with unrolled FNV-1a.
+// Pre-lowercases once, then hashes 4-byte grams with MD5 (matching
+// Rust/Python parity — first 8 bytes of MD5 digest as big-endian u64).
 func simhashASCII(text string) uint64 {
 	n := len(text)
 
@@ -299,22 +303,12 @@ func simhashASCII(text string) uint64 {
 		lower[i] = c
 	}
 
-	const fnvOffset = uint64(14695981039346656037)
-	const fnvPrime = uint64(1099511628211)
-
 	var votes [64]int32
 
 	if n >= 4 {
 		for i := 0; i <= n-4; i++ {
-			h := fnvOffset
-			h ^= uint64(lower[i])
-			h *= fnvPrime
-			h ^= uint64(lower[i+1])
-			h *= fnvPrime
-			h ^= uint64(lower[i+2])
-			h *= fnvPrime
-			h ^= uint64(lower[i+3])
-			h *= fnvPrime
+			digest := md5.Sum(lower[i : i+4])
+			h := binary.BigEndian.Uint64(digest[:8])
 
 			for j := range 64 {
 				if (h>>j)&1 == 1 {
@@ -325,11 +319,8 @@ func simhashASCII(text string) uint64 {
 			}
 		}
 	} else {
-		h := fnvOffset
-		for i := 0; i < n; i++ {
-			h ^= uint64(lower[i])
-			h *= fnvPrime
-		}
+		digest := md5.Sum(lower[:n])
+		h := binary.BigEndian.Uint64(digest[:8])
 		for j := range 64 {
 			if (h>>j)&1 == 1 {
 				votes[j]++
@@ -376,12 +367,9 @@ func simhashUnicode(text string) uint64 {
 			off += utf8.EncodeRune(buf[off:], r)
 		}
 
-		// Inline FNV-1a 64-bit hash for the gram (replaces md5).
-		h := uint64(14695981039346656037)
-		for j := 0; j < off; j++ {
-			h ^= uint64(buf[j])
-			h *= 1099511628211
-		}
+		// MD5 hash matching Rust/Python: first 8 bytes as big-endian u64.
+		digest := md5.Sum(buf[:off])
+		h := binary.BigEndian.Uint64(digest[:8])
 
 		for j := range 64 {
 			if (h>>j)&1 == 1 {

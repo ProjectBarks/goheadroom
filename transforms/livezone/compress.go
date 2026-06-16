@@ -48,7 +48,11 @@ func compressTextWithCCR(text string, model string, store ccr.CcrStore) (compres
 		}
 	case contentdetector.BuildOutput:
 		lc := logcompressor.New(logcompressor.DefaultConfig())
-		lr, _ := lc.Compress(text, 0.0)
+		// Use CompressWithStore with an InMemoryStore to emit the CCR
+		// retrieval footer, matching the Rust FFI which always provides
+		// an InMemoryCcrStore to compress_with_store.
+		lcStore := ccr.NewInMemoryStore()
+		lr, _ := lc.CompressWithStore(text, 0.0, lcStore)
 		if lr.Compressed != lr.Original {
 			compressedText = lr.Compressed
 			strategy = "log_compressor"

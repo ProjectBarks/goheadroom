@@ -170,7 +170,8 @@ func New(config LogCompressorConfig) *LogCompressor {
 	return &LogCompressor{config: config}
 }
 
-// Compress compresses content.
+// Compress compresses content without a CCR store, matching Rust's
+// compress() which passes None. No CCR footer is emitted.
 func (lc *LogCompressor) Compress(content string, bias float64) (LogCompressionResult, LogCompressorStats) {
 	return lc.CompressWithStore(content, bias, nil)
 }
@@ -216,8 +217,6 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 			stats.CCRSkipReason = &reason
 		} else if store != nil {
 			key := md5Hex24(content)
-			store.Put(key, []byte(content))
-			// Build marker with strings.Builder to avoid string concat alloc.
 			var mb strings.Builder
 			mb.Grow(len(compressed) + 80)
 			mb.WriteString(compressed)
@@ -229,6 +228,7 @@ func (lc *LogCompressor) CompressWithStore(content string, bias float64, store c
 			mb.WriteString(key)
 			mb.WriteByte(']')
 			compressed = mb.String()
+			store.Put(key, []byte(content))
 			cacheKey = &key
 			stats.CCREmitted = true
 		} else {

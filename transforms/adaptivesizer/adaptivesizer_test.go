@@ -11,35 +11,35 @@ import (
 // ---------- Simhash (verified against Rust reference) ----------
 
 func TestSimhash_EmptyString(t *testing.T) {
-	// FNV-1a offset basis (single iteration on empty gram).
-	assert.Equal(t, uint64(0xcbf29ce484222325), Simhash(""))
+	// md5("")[:16] = "d41d8cd98f00b204" (matches Rust reference).
+	assert.Equal(t, uint64(0xd41d8cd98f00b204), Simhash(""))
 }
 
 func TestSimhash_SingleChar(t *testing.T) {
-	// FNV-1a("a")
-	assert.Equal(t, uint64(0xaf63dc4c8601ec8c), Simhash("a"))
+	// md5("a")[:16] = "0cc175b9c0f1b6a8"
+	assert.Equal(t, uint64(0x0cc175b9c0f1b6a8), Simhash("a"))
 }
 
 func TestSimhash_ShortStrings(t *testing.T) {
-	// For n <= 3, single iteration; fp = FNV-1a(text) as u64.
-	assert.Equal(t, uint64(0x89c4407b545986a), Simhash("ab"))
-	assert.Equal(t, uint64(0xe71fa2190541574b), Simhash("abc"))
+	// For n <= 3, single iteration; fp = md5(text) first 8 bytes as big-endian u64.
+	assert.Equal(t, uint64(0x187ef4436122d1cc), Simhash("ab"))
+	assert.Equal(t, uint64(0x900150983cd24fb0), Simhash("abc"))
 }
 
 func TestSimhash_FourChars(t *testing.T) {
 	// n=4: max(1, 4-3)=1, single iteration on full string.
-	assert.Equal(t, uint64(0xfc179f83ee0724dd), Simhash("abcd"))
+	assert.Equal(t, uint64(0xe2fc714c4727ee93), Simhash("abcd"))
 }
 
 func TestSimhash_MultiWindow(t *testing.T) {
 	// n>=5: bit voting from multiple grams.
-	assert.Equal(t, uint64(0xa98744053021004), Simhash("hello"))
-	assert.Equal(t, uint64(0x4a98f4a451080124), Simhash("hello world"))
+	assert.Equal(t, uint64(0x0209020130100020), Simhash("hello"))
+	assert.Equal(t, uint64(0x4681260120120222), Simhash("hello world"))
 }
 
 func TestSimhash_Unicode(t *testing.T) {
 	// "cafe" is 4 codepoints -- should iterate once on the full string.
-	assert.Equal(t, uint64(0x48e8823acfa40d89), Simhash("café"))
+	assert.Equal(t, uint64(0x07117fe4a1ebd544), Simhash("café"))
 }
 
 func TestSimhash_Lowercasing(t *testing.T) {
@@ -58,7 +58,7 @@ func TestSimhash_DifferentInputs(t *testing.T) {
 }
 
 func TestSimhash_LongerText(t *testing.T) {
-	assert.Equal(t, uint64(0x793e36f4200e9d18), Simhash("The quick brown fox jumps"))
+	assert.Equal(t, uint64(0x30875e2639b3cb98), Simhash("The quick brown fox jumps"))
 }
 
 func TestSimhash_SimilarInputs(t *testing.T) {
@@ -224,11 +224,13 @@ func TestComputeOptimalK_LowDiversity(t *testing.T) {
 }
 
 func TestComputeOptimalK_AllUnique(t *testing.T) {
+	// 20 distinct items, no knee, diversity_ratio=1.0 -> keep ~100% -> 20.
+	// Matches Rust reference.
 	items := make([]string, 20)
 	for i := range items {
 		items[i] = fmt.Sprintf("unique item number %d with some long content", i)
 	}
-	assert.Equal(t, 16, ComputeOptimalK(items, 1.0, 3, nil))
+	assert.Equal(t, 20, ComputeOptimalK(items, 1.0, 3, nil))
 }
 
 func TestComputeOptimalK_RespectsMaxK(t *testing.T) {
