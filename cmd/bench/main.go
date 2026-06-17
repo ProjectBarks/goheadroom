@@ -51,6 +51,36 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "%d\n", time.Since(start).Nanoseconds()/int64(benchN))
 	}
-	out, _ := json.Marshal(run())
-	fmt.Print(string(out))
+	fmt.Print(benchString(run()))
+}
+
+// benchString extracts the primary output string from a comparator result,
+// matching the format that the Rust/Python bench binaries produce for
+// string comparison in the report generator.
+func benchString(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case int:
+		return strconv.Itoa(val)
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case map[string]interface{}:
+		if c, ok := val["compressed"].(string); ok {
+			return c
+		}
+		if ct, ok := val["content_type"].(string); ok {
+			if conf, ok := val["confidence"].(float64); ok {
+				return fmt.Sprintf("%s:%.4f", ct, conf)
+			}
+		}
+		if bh, ok := val["bench_hash"].(string); ok {
+			return bh
+		}
+		b, _ := json.Marshal(val)
+		return string(b)
+	default:
+		b, _ := json.Marshal(val)
+		return string(b)
+	}
 }
