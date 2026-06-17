@@ -5,7 +5,7 @@ compares outputs, times cold (CLI) and warm (library) paths,
 generates self-contained HTML with diffs and triple benchmarks.
 
 Usage:
-    python3 scripts/generate-parity-report.py [--go-bin PATH] [--rust-bin PATH] [--python-bin PATH] [--fixtures DIR] [--out PATH]
+    python3 scripts/generate-parity-report.py [--go-bench PATH] [--rust-bin PATH] [--python-bin PATH] [--fixtures DIR] [--out PATH]
 
 Requires: pip install jinja2
 """
@@ -29,9 +29,9 @@ PYTHON_NATIVE_TRANSFORMS = {"content_detector", "ccr", "cache_aligner", "code_co
 
 def parse_args():
     p = argparse.ArgumentParser(description="Generate goheadroom parity report")
-    p.add_argument("--go-bin",
-        default=os.environ.get("PARITY_GO_BIN", str(PROJECT_DIR / "goheadroom-parity-check")),
-        help="Path to Go parity-check binary (default: $PARITY_GO_BIN or ./goheadroom-parity-check)")
+    p.add_argument("--go-bench",
+        default=os.environ.get("PARITY_GO_BENCH", str(PROJECT_DIR / "goheadroom-bench")),
+        help="Path to Go bench binary (default: $PARITY_GO_BENCH or ./goheadroom-bench)")
     p.add_argument("--rust-bin",
         default=os.environ.get("PARITY_RUST_BIN", ""),
         help="Path to Rust bench binary (default: $PARITY_RUST_BIN or $PATH lookup)")
@@ -44,6 +44,8 @@ def parse_args():
     p.add_argument("--out",
         default=str(PROJECT_DIR / "parity-report.html"),
         help="Output HTML path")
+    p.add_argument("--warm-iters", type=int, default=50,
+        help="Iterations for warm benchmarks (default: 50)")
     p.add_argument("--cold-runs", type=int, default=3,
         help="Runs for cold timing (default: 3)")
     return p.parse_args()
@@ -79,81 +81,139 @@ def run_timed(cmd, runs=3):
     return stdout, rc, best_ms if best_ms < float("inf") else 0
 
 
+def run_warm(cmd, fixture_path, iterations=50):
+    if isinstance(cmd, str):
+        cmd = [cmd]
+    try:
+        r = subprocess.run(
+            cmd + [fixture_path, "--bench", str(iterations)],
+            capture_output=True, text=True, timeout=60
+        )
+        if r.returncode == 0:
+            for line in r.stderr.strip().splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    return int(line)
+    except Exception:
+        pass
+    return 0
+
+
 def collect_results(args):
-    go_bin = find_binary("goheadroom-parity-check", [
-        args.go_bin, str(PROJECT_DIR / "goheadroom-parity-check")])
+    go_bin = find_binary("goheadroom-bench", [
+        args.go_bench, str(PROJECT_DIR / "goheadroom-bench")])
     rust_bin = find_binary("headroom-bench", [args.rust_bin])
     python_cmd = None
-    if args.python_bin:
-        python_cmd = args.python_bin.split()
-    elif (PROJECT_DIR / "scripts" / "python-bench.py").exists():
-        python_cmd = ["python3", str(PROJECT_DIR / "scripts" / "python-bench.py")]
+    python_bin = args.python_bin
+    if not python_bin:
+        candidate = PROJECT_DIR / "scripts" / "python-bench.py"
+        if candidate.exists():
+            python_bin = f"python3 {candidate}"
+    if python_bin:
+        python_cmd = python_bin.split()
 
     if not go_bin:
-        print("ERROR: parity-check binary not found. Build with:", file=sys.stderr)
-        print("  go build -o goheadroom-parity-check ./cmd/parity-check/", file=sys.stderr)
-        print("Or pass --go-bin <path>", file=sys.stderr)
+        print("ERROR: Go bench binary not found. Build with:", file=sys.stderr)
+        print("  go build -o goheadroom-bench ./cmd/bench/", file=sys.stderr)
+        print("Or pass --go-bench <path> or set $PARITY_GO_BENCH", file=sys.stderr)
         sys.exit(1)
     if not rust_bin:
-        print("WARNING: Rust bench binary not found. Pass --rust-bin <path> or add to $PATH.", file=sys.stderr)
+        print("WARNING: Rust bench binary not found. Pass --rust-bin <path> or set $PARITY_RUST_BIN.", file=sys.stderr)
 
     print(f"Go binary:     {go_bin}", file=sys.stderr)
     print(f"Rust binary:   {rust_bin or '(not found)'}", file=sys.stderr)
     print(f"Python binary: {python_cmd[0] if python_cmd else '(not found)'}", file=sys.stderr)
 
-    r = subprocess.run([go_bin, args.fixtures, "--json"],
-                       capture_output=True, text=True, timeout=120)
-    if r.returncode not in (0, 1):
-        print(f"ERROR: parity-check failed: {r.stderr[:200]}", file=sys.stderr)
-        sys.exit(1)
+    fixtures_dir = Path(args.fixtures)
+    fixtures = sorted(fixtures_dir.rglob("*.json"))
+    print(f"Processing {len(fixtures)} fixtures...", file=sys.stderr)
 
-    go_results = json.loads(r.stdout)
-    print(f"Processing {len(go_results)} results...", file=sys.stderr)
-
+    warm_iters = args.warm_iters
+    cold_runs = args.cold_runs
     results = []
-    for i, gr in enumerate(go_results):
-        fpath = Path(args.fixtures) / gr["transform"] / gr.get("fixture", "")
-        fixture_input = ""
-        if fpath.exists():
-            with open(fpath) as f:
-                raw_input = json.load(f).get("input", "")
-            fixture_input = (raw_input[:3000] if isinstance(raw_input, str)
-                           else json.dumps(raw_input, indent=2)[:3000])
+
+    for i, fpath in enumerate(fixtures):
+        with open(fpath) as f:
+            fix = json.load(f)
+        transform = fix.get("transform", "unknown")
+        category = fpath.parent.name
+
+        raw_input = fix.get("input", "")
+        fixture_input = raw_input[:3000] if isinstance(raw_input, str) else json.dumps(raw_input, indent=2)[:3000]
+
+        go_out, go_rc, go_ms = run_timed([go_bin, str(fpath)], cold_runs)
 
         rust_out, rust_rc, rust_ms = "", 1, 0
-        if rust_bin and fpath.exists():
-            rust_out, rust_rc, rust_ms = run_timed([rust_bin, str(fpath)], args.cold_runs)
+        if rust_bin:
+            rust_out, rust_rc, rust_ms = run_timed([rust_bin, str(fpath)], cold_runs)
 
         python_out, python_rc, python_ms = "", 1, 0
-        if python_cmd and fpath.exists() and gr["transform"] in PYTHON_NATIVE_TRANSFORMS:
+        if python_cmd:
             try:
-                python_out, python_rc, python_ms = run_timed(python_cmd + [str(fpath)], args.cold_runs)
+                python_out, python_rc, python_ms = run_timed(python_cmd + [str(fpath)], cold_runs)
             except Exception:
                 pass
 
-        compared_to = "Python" if gr["transform"] in PYTHON_NATIVE_TRANSFORMS and python_cmd else "Rust"
+        use_python = transform in PYTHON_NATIVE_TRANSFORMS and python_cmd and python_rc == 0
+
+        if go_out.startswith("SKIP:"):
+            status, compared_to = "both_skip", "-"
+        elif use_python:
+            if go_rc != 0:
+                status, compared_to = "go_error", "-"
+            elif go_out == python_out:
+                status, compared_to = "pass", "Python"
+            else:
+                status, compared_to = "fail", "Python"
+        elif not rust_bin:
+            status = "pass" if go_rc == 0 else "go_error"
+            compared_to = "Go-only"
+        elif go_rc != 0 and rust_rc != 0:
+            status, compared_to = "both_skip", "-"
+        elif go_rc != 0:
+            status, compared_to = "go_error", "-"
+        elif rust_rc != 0:
+            status = "pass" if go_rc == 0 else "rust_error"
+            compared_to = "Go-only"
+        elif go_out == rust_out:
+            status, compared_to = "pass", "Rust"
+        else:
+            status, compared_to = "fail", "Rust"
+
         diff_html = ""
-        if gr["status"] == "fail" and gr.get("message"):
-            diff_html = f'<span class="diff-del">{escape(gr.get("message", "")[:500])}</span>'
+        if status == "fail":
+            compare_out = python_out if use_python else rust_out
+            diff_html = compute_diff_html(go_out[:3000], compare_out[:3000])
+
+        skip_warm = go_out.startswith("SKIP:")
+        iters = max(10, warm_iters // 5) if transform == "tokenizer" else warm_iters
+        go_warm_ns = run_warm([go_bin], str(fpath), iters) if go_rc == 0 and not skip_warm else 0
+        rust_warm_ns = run_warm([rust_bin], str(fpath), iters) if rust_bin and rust_rc == 0 and not skip_warm else 0
+        python_warm_ns = run_warm(python_cmd, str(fpath), iters) if python_cmd and python_rc == 0 and not skip_warm else 0
 
         results.append({
-            "fixture": gr.get("fixture", ""),
-            "category": gr["transform"],
-            "transform": gr["transform"],
-            "status": gr["status"],
+            "fixture": fpath.name,
+            "category": category,
+            "transform": transform,
+            "status": status,
             "compared_to": compared_to,
             "fixture_input": escape(fixture_input),
-            "go_ms": gr.get("go_ms", 0),
+            "go_ms": round(go_ms, 2),
             "rust_ms": round(rust_ms, 2),
-            "python_ms": round(python_ms, 2),
-            "go_bytes": 0, "rust_bytes": len(rust_out), "python_bytes": len(python_out),
-            "go_out": "", "rust_out": escape(rust_out[:1500]),
+            "python_ms": round(python_ms, 2) if python_ms else 0,
+            "go_bytes": len(go_out),
+            "rust_bytes": len(rust_out),
+            "python_bytes": len(python_out),
+            "go_out": escape(go_out[:1500]),
+            "rust_out": escape(rust_out[:1500]),
             "python_out": escape(python_out[:1500]),
             "diff_html": diff_html,
-            "go_warm_us": 0, "rust_warm_us": 0, "python_warm_us": 0,
+            "go_warm_us": round(go_warm_ns / 1000, 1) if go_warm_ns else 0,
+            "rust_warm_us": round(rust_warm_ns / 1000, 1) if rust_warm_ns else 0,
+            "python_warm_us": round(python_warm_ns / 1000, 1) if python_warm_ns else 0,
         })
-        if (i + 1) % 50 == 0:
-            print(f"  {i + 1}/{len(go_results)}...", file=sys.stderr)
+        if (i + 1) % 20 == 0:
+            print(f"  {i + 1}/{len(fixtures)}...", file=sys.stderr)
 
     return results
 
