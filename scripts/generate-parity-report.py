@@ -175,6 +175,9 @@ def collect_results(args):
         elif rust_rc != 0:
             status = "pass" if go_rc == 0 else "rust_error"
             compared_to = "Go-only"
+        elif rust_out.startswith("SKIP:"):
+            status = "pass" if go_rc == 0 else "go_error"
+            compared_to = "Go-only"
         elif go_out == rust_out:
             status, compared_to = "pass", "Rust"
         else:

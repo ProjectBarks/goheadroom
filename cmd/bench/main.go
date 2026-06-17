@@ -1,7 +1,6 @@
 // bench runs a single parity fixture through the Go transform and prints the output.
 // Used by generate-parity-report.py for live Go-vs-Python/Rust comparison.
-// Every transform handler must use the same config as the parity comparators.
-// No SKIP -- every transform must produce real output.
+// Every transform handler must produce output matching the Rust bench binary format.
 package main
 
 import (
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/projectbarks/goheadroom/core/ccr"
 	"github.com/projectbarks/goheadroom/core/parity"
 	"github.com/projectbarks/goheadroom/core/tokenizer"
 	"github.com/projectbarks/goheadroom/core/transforms/codecompressor"
@@ -24,6 +24,16 @@ import (
 	"github.com/projectbarks/goheadroom/core/transforms/searchcompressor"
 	"github.com/projectbarks/goheadroom/core/transforms/smartcrusher"
 )
+
+var contentTypeDebugName = map[contentdetector.ContentType]string{
+	contentdetector.PlainText:     "PlainText",
+	contentdetector.JsonArray:     "JsonArray",
+	contentdetector.SourceCode:    "SourceCode",
+	contentdetector.SearchResults: "SearchResults",
+	contentdetector.BuildOutput:   "BuildOutput",
+	contentdetector.GitDiff:       "GitDiff",
+	contentdetector.Html:          "Html",
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -105,15 +115,15 @@ func makeRunner(fix parity.Fixture) func() string {
 		json.Unmarshal(fix.Input, &input)
 		return func() string {
 			det := contentdetector.DetectContentType(input)
-			return fmt.Sprintf("%s:%.4f", det.ContentType.String(), det.Confidence)
+			name := contentTypeDebugName[det.ContentType]
+			return fmt.Sprintf("%s:%.2f", name, det.Confidence)
 		}
 
 	case "ccr":
-		var input interface{}
-		json.Unmarshal(fix.Input, &input)
-		raw, _ := json.Marshal(input)
+		raw, _ := json.Marshal(json.RawMessage(fix.Input))
 		return func() string {
-			return fmt.Sprintf("roundtrip:%d", len(raw))
+			key := ccr.ComputeKey(raw)
+			return fmt.Sprintf("OK:%s", key)
 		}
 
 	case "cache_aligner":
