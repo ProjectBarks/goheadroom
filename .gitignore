@@ -10,6 +10,8 @@ libtokenizers.a
 
 # Binaries
 parity-check
+bench
+bin/
 
 # Generated reports
 logs/
