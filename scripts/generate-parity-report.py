@@ -59,7 +59,7 @@ def find_binary(name, hint_paths):
     return shutil.which(name)
 
 
-def run_timed(cmd, runs=3):
+def run_timed(cmd, runs=3, env=None):
     if isinstance(cmd, str):
         cmd = [cmd]
     best_ms = float("inf")
@@ -68,7 +68,7 @@ def run_timed(cmd, runs=3):
     for _ in range(runs):
         t0 = time.perf_counter()
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env)
             elapsed = (time.perf_counter() - t0) * 1000
             if r.returncode == 0:
                 stdout = r.stdout
@@ -81,13 +81,13 @@ def run_timed(cmd, runs=3):
     return stdout, rc, best_ms if best_ms < float("inf") else 0
 
 
-def run_warm(cmd, fixture_path, iterations=50):
+def run_warm(cmd, fixture_path, iterations=50, env=None):
     if isinstance(cmd, str):
         cmd = [cmd]
     try:
         r = subprocess.run(
             cmd + [fixture_path, "--bench", str(iterations)],
-            capture_output=True, text=True, timeout=60
+            capture_output=True, text=True, timeout=60, env=env
         )
         if r.returncode == 0:
             for line in r.stderr.strip().splitlines():
@@ -108,9 +108,19 @@ def collect_results(args):
     if not python_bin:
         candidate = PROJECT_DIR / "scripts" / "python-bench.py"
         if candidate.exists():
-            python_bin = f"python3 {candidate}"
+            headroom_venv_py = Path.home() / "headroom-src" / ".venv" / "bin" / "python"
+            if headroom_venv_py.exists():
+                python_bin = f"{headroom_venv_py} {candidate}"
+            else:
+                python_bin = f"python3 {candidate}"
     if python_bin:
         python_cmd = python_bin.split()
+
+    python_env = os.environ.copy()
+    if python_cmd:
+        headroom_src = Path.home() / "headroom-src"
+        if headroom_src.is_dir() and "PYTHONPATH" not in os.environ:
+            python_env["PYTHONPATH"] = str(headroom_src)
 
     if not go_bin:
         print("ERROR: Go bench binary not found. Build with:", file=sys.stderr)
@@ -150,14 +160,20 @@ def collect_results(args):
         python_out, python_rc, python_ms = "", 1, 0
         if python_cmd:
             try:
-                python_out, python_rc, python_ms = run_timed(python_cmd + [str(fpath)], cold_runs)
+                python_out, python_rc, python_ms = run_timed(python_cmd + [str(fpath)], cold_runs, env=python_env)
             except Exception:
                 pass
 
         use_python = transform in PYTHON_NATIVE_TRANSFORMS and python_cmd and python_rc == 0
+        rust_available = rust_bin and rust_rc == 0 and not rust_out.startswith("SKIP:")
 
-        if go_out.startswith("SKIP:"):
-            status, compared_to = "both_skip", "-"
+        if rust_available:
+            if go_rc != 0:
+                status, compared_to = "go_error", "-"
+            elif go_out == rust_out:
+                status, compared_to = "pass", "Rust"
+            else:
+                status, compared_to = "fail", "Rust"
         elif use_python:
             if go_rc != 0:
                 status, compared_to = "go_error", "-"
@@ -165,34 +181,22 @@ def collect_results(args):
                 status, compared_to = "pass", "Python"
             else:
                 status, compared_to = "fail", "Python"
-        elif not rust_bin:
-            status = "pass" if go_rc == 0 else "go_error"
-            compared_to = "Go-only"
-        elif go_rc != 0 and rust_rc != 0:
-            status, compared_to = "both_skip", "-"
         elif go_rc != 0:
             status, compared_to = "go_error", "-"
         elif rust_rc != 0:
-            status = "pass" if go_rc == 0 else "rust_error"
-            compared_to = "Go-only"
-        elif rust_out.startswith("SKIP:"):
-            status = "pass" if go_rc == 0 else "go_error"
-            compared_to = "Go-only"
-        elif go_out == rust_out:
-            status, compared_to = "pass", "Rust"
+            status, compared_to = "rust_error", "-"
         else:
-            status, compared_to = "fail", "Rust"
+            status, compared_to = "fail", "-"
 
         diff_html = ""
         if status == "fail":
-            compare_out = python_out if use_python else rust_out
+            compare_out = rust_out if rust_available else python_out
             diff_html = compute_diff_html(go_out[:3000], compare_out[:3000])
 
-        skip_warm = go_out.startswith("SKIP:")
         iters = max(10, warm_iters // 5) if transform == "tokenizer" else warm_iters
-        go_warm_ns = run_warm([go_bin], str(fpath), iters) if go_rc == 0 and not skip_warm else 0
-        rust_warm_ns = run_warm([rust_bin], str(fpath), iters) if rust_bin and rust_rc == 0 and not skip_warm else 0
-        python_warm_ns = run_warm(python_cmd, str(fpath), iters) if python_cmd and python_rc == 0 and not skip_warm else 0
+        go_warm_ns = run_warm([go_bin], str(fpath), iters) if go_rc == 0 else 0
+        rust_warm_ns = run_warm([rust_bin], str(fpath), iters) if rust_bin and rust_rc == 0 else 0
+        python_warm_ns = run_warm(python_cmd, str(fpath), iters, env=python_env) if python_cmd and python_rc == 0 else 0
 
         results.append({
             "fixture": fpath.name,
@@ -214,6 +218,9 @@ def collect_results(args):
             "go_warm_us": round(go_warm_ns / 1000, 1) if go_warm_ns else 0,
             "rust_warm_us": round(rust_warm_ns / 1000, 1) if rust_warm_ns else 0,
             "python_warm_us": round(python_warm_ns / 1000, 1) if python_warm_ns else 0,
+            "go_warm_ns": go_warm_ns,
+            "rust_warm_ns": rust_warm_ns,
+            "python_warm_ns": python_warm_ns,
         })
         if (i + 1) % 20 == 0:
             print(f"  {i + 1}/{len(fixtures)}...", file=sys.stderr)
@@ -268,12 +275,42 @@ def build_categories(results):
     return categories
 
 
+def validate_results(results):
+    """Validate that every fixture was compared, passed, and has benchmark speed."""
+    violations = []
+    for r in results:
+        name = f"{r['category']}/{r['fixture']}"
+        if r["compared_to"] in ("-", "Go-only", ""):
+            violations.append({"fixture": name, "rule": "not_compared",
+                "detail": f"compared_to={r['compared_to']}, status={r['status']}"})
+        if r["status"] != "pass":
+            violations.append({"fixture": name, "rule": "not_pass",
+                "detail": f"status={r['status']}"})
+        if r["go_out"].startswith("SKIP:"):
+            violations.append({"fixture": name, "rule": "skip_output",
+                "detail": f"go_out={r['go_out'][:60]}"})
+        if r["go_warm_ns"] <= 0:
+            violations.append({"fixture": name, "rule": "no_go_speed",
+                "detail": f"go_warm_ns={r['go_warm_ns']}"})
+        ref = r["compared_to"]
+        if ref == "Rust" and r["rust_warm_ns"] <= 0:
+            violations.append({"fixture": name, "rule": "no_rust_speed",
+                "detail": f"rust_warm_ns={r['rust_warm_ns']}"})
+        if ref == "Python" and r["python_warm_ns"] <= 0:
+            violations.append({"fixture": name, "rule": "no_python_speed",
+                "detail": f"python_warm_ns={r['python_warm_ns']}"})
+    return violations
+
+
 def render(results, out_path):
     total = len(results)
     passed = sum(1 for r in results if r["status"] == "pass")
     failed = sum(1 for r in results if r["status"] == "fail")
-    skipped = sum(1 for r in results if r["status"] in ("both_skip", "go_error", "rust_error"))
+    skipped = sum(1 for r in results if r["status"] in ("go_error", "rust_error"))
     pct = (passed / total * 100) if total else 0
+
+    violations = validate_results(results)
+    validation_passed = len(violations) == 0
 
     env = Environment(
         loader=FileSystemLoader(str(TEMPLATE_DIR)),
@@ -291,12 +328,23 @@ def render(results, out_path):
         pct=pct,
         ncols=15,
         categories=build_categories(results),
+        validation_passed=validation_passed,
+        violations=violations[:50],
+        n_violations=len(violations),
     )
 
     with open(out_path, "w") as f:
         f.write(html)
     print(f"\nReport: {out_path}", file=sys.stderr)
-    print(f"{passed}/{total} pass ({pct:.0f}%), {failed} fail, {skipped} skip", file=sys.stderr)
+    print(f"{passed}/{total} pass ({pct:.0f}%), {failed} fail, {skipped} error", file=sys.stderr)
+
+    if not validation_passed:
+        print(f"\nVALIDATION FAILED: {len(violations)} violations", file=sys.stderr)
+        for v in violations[:20]:
+            print(f"  [{v['rule']}] {v['fixture']}: {v['detail']}", file=sys.stderr)
+        if len(violations) > 20:
+            print(f"  ... and {len(violations) - 20} more", file=sys.stderr)
+        sys.exit(1)
 
 
 def main():

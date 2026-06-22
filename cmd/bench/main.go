@@ -5,6 +5,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -129,18 +130,53 @@ func makeRunner(fix parity.Fixture) func() string {
 	case "cache_aligner":
 		var messages []map[string]interface{}
 		json.Unmarshal(fix.Input, &messages)
-		var parts []string
-		for _, m := range messages {
-			if role, _ := m["role"].(string); role == "system" {
-				if content, _ := m["content"].(string); content != "" {
-					parts = append(parts, content)
+		tok := tokenizer.GetTokenizer("gpt-4o")
+		tokensBefore := 3
+		for _, msg := range messages {
+			tokensBefore += 3
+			if role, ok := msg["role"].(string); ok {
+				tokensBefore += tok.CountText(role)
+			}
+			if content, ok := msg["content"].(string); ok {
+				tokensBefore += tok.CountText(content)
+			}
+		}
+		var systemParts []string
+		for _, msg := range messages {
+			if role, _ := msg["role"].(string); role == "system" {
+				if content, ok := msg["content"].(string); ok {
+					systemParts = append(systemParts, content)
 				}
 			}
 		}
-		joined := strings.Join(parts, "\n---\n")
-		h := sha256.Sum256([]byte(joined))
-		hash16 := fmt.Sprintf("%x", h[:8])
-		return func() string { return hash16 }
+		systemText := strings.Join(systemParts, "\n---\n")
+		stableHash := sha256Hex16(systemText)
+		benchHash := stableHash
+		prefixBytes := len(systemText)
+		prefixTokens := tok.CountText(systemText)
+		out := map[string]interface{}{
+			"bench_hash": benchHash,
+			"cache_metrics": map[string]interface{}{
+				"prefix_changed":           false,
+				"previous_hash":            nil,
+				"stable_prefix_bytes":      prefixBytes,
+				"stable_prefix_hash":       stableHash,
+				"stable_prefix_tokens_est": prefixTokens,
+			},
+			"diff_artifact":      nil,
+			"markers_inserted":   []string{"stable_prefix_hash:" + stableHash},
+			"messages":           messages,
+			"timing":             map[string]interface{}{},
+			"tokens_after":       tokensBefore,
+			"tokens_before":      tokensBefore,
+			"transforms_applied": []string{},
+			"warnings":           []interface{}{},
+			"waste_signals":      nil,
+		}
+		return func() string {
+			b, _ := json.Marshal(out)
+			return string(b)
+		}
 
 	case "json_compressor":
 		var input string
@@ -190,4 +226,9 @@ func makeRunner(fix parity.Fixture) func() string {
 	default:
 		return nil
 	}
+}
+
+func sha256Hex16(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])[:16]
 }

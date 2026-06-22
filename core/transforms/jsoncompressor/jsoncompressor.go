@@ -80,7 +80,10 @@ func Compress(content string, cfg Config) Result {
 			}
 		case tokComma:
 			sb.WriteString(tok.text)
-			if len(containerStack) > 0 && containerStack[len(containerStack)-1] == '[' && len(arrayItemStack) > 0 {
+			// Count all commas when inside any array (matching Python behaviour,
+			// which increments array_item_counts[array_depth] for every comma
+			// at array_depth > 0, even commas inside nested objects).
+			if len(arrayItemStack) > 0 {
 				arrayItemStack[len(arrayItemStack)-1]++
 			}
 		case tokKey:

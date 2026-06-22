@@ -101,7 +101,7 @@
   <div class="cards">
     <div class="card"><div class="card-v pass">{{ passed }}</div><div class="card-l">Pass</div></div>
     <div class="card"><div class="card-v fail">{{ failed }}</div><div class="card-l">Fail</div></div>
-    <div class="card"><div class="card-v skip-c">{{ skipped }}</div><div class="card-l">Skip</div></div>
+    <div class="card"><div class="card-v" style="color:#f85149">{{ skipped }}</div><div class="card-l">Error</div></div>
     <div class="card"><div class="card-v" style="color:#f0f6fc">{{ total }}</div><div class="card-l">Total</div></div>
   </div>
 </div>
@@ -146,7 +146,7 @@
   <button class="fbtn on" onclick="filt('all',this)">All ({{ total }})</button>
   <button class="fbtn" onclick="filt('pass',this)">Pass ({{ passed }})</button>
   <button class="fbtn" onclick="filt('fail',this)">Fail ({{ failed }})</button>
-  <button class="fbtn" onclick="filt('skip',this)">Skip ({{ skipped }})</button>
+  <button class="fbtn" onclick="filt('error',this)">Error ({{ skipped }})</button>
 </div>
 
 <table>
@@ -173,13 +173,80 @@
   </thead>
   <tbody>
     {% for cat in categories %}
-      {{ category_header(cat) }}
+      {{ category_header(cat, ncols) }}
       {% for e in cat.entries %}
-        {{ fixture_row(e) }}
+        {{ fixture_row(e, ncols) }}
       {% endfor %}
     {% endfor %}
   </tbody>
 </table>
+
+{# ── Validation Gate ── #}
+<h2>Validation Gate</h2>
+<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:1.2rem;margin-bottom:1.5rem">
+  <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:.8rem">
+    {% if validation_passed %}
+      <span style="color:#3fb950;font-size:1.6rem">&#10003;</span>
+      <span style="color:#3fb950;font-size:1.1rem;font-weight:700">ALL CHECKS PASSED</span>
+    {% else %}
+      <span style="color:#f85149;font-size:1.6rem">&#10007;</span>
+      <span style="color:#f85149;font-size:1.1rem;font-weight:700">VALIDATION FAILED ({{ n_violations }} violations)</span>
+    {% endif %}
+  </div>
+  <p style="color:#8b949e;font-size:.8rem;margin-bottom:.8rem">
+    Every fixture must satisfy ALL of the following rules. The report generator exits non-zero if any rule is violated.
+  </p>
+  <table style="width:100%;margin-bottom:.8rem">
+    <thead>
+      <tr>
+        <th style="width:30px"></th>
+        <th>Rule</th>
+        <th>Description</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>{% if validation_passed %}<span style="color:#3fb950">&#10003;</span>{% else %}{% set ns = namespace(ok=true) %}{% for v in violations %}{% if v.rule == 'not_compared' %}{% set ns.ok = false %}{% endif %}{% endfor %}{% if ns.ok %}<span style="color:#3fb950">&#10003;</span>{% else %}<span style="color:#f85149">&#10007;</span>{% endif %}{% endif %}</td>
+        <td class="mono" style="font-size:.8rem">compared</td>
+        <td style="font-size:.8rem;color:#c9d1d9">Every case must be compared to Python or Rust. No "Go-only" allowed.</td>
+      </tr>
+      <tr>
+        <td>{% if validation_passed %}<span style="color:#3fb950">&#10003;</span>{% else %}{% set ns = namespace(ok=true) %}{% for v in violations %}{% if v.rule == 'not_pass' %}{% set ns.ok = false %}{% endif %}{% endfor %}{% if ns.ok %}<span style="color:#3fb950">&#10003;</span>{% else %}<span style="color:#f85149">&#10007;</span>{% endif %}{% endif %}</td>
+        <td class="mono" style="font-size:.8rem">pass</td>
+        <td style="font-size:.8rem;color:#c9d1d9">Every case must pass (Go output == reference output).</td>
+      </tr>
+      <tr>
+        <td>{% if validation_passed %}<span style="color:#3fb950">&#10003;</span>{% else %}{% set ns = namespace(ok=true) %}{% for v in violations %}{% if v.rule == 'skip_output' %}{% set ns.ok = false %}{% endif %}{% endfor %}{% if ns.ok %}<span style="color:#3fb950">&#10003;</span>{% else %}<span style="color:#f85149">&#10007;</span>{% endif %}{% endif %}</td>
+        <td class="mono" style="font-size:.8rem">no_skip</td>
+        <td style="font-size:.8rem;color:#c9d1d9">No Go output may begin with "SKIP:". Every transform must produce real output.</td>
+      </tr>
+      <tr>
+        <td>{% if validation_passed %}<span style="color:#3fb950">&#10003;</span>{% else %}{% set ns = namespace(ok=true) %}{% for v in violations %}{% if v.rule in ('no_go_speed', 'no_rust_speed', 'no_python_speed') %}{% set ns.ok = false %}{% endif %}{% endfor %}{% if ns.ok %}<span style="color:#3fb950">&#10003;</span>{% else %}<span style="color:#f85149">&#10007;</span>{% endif %}{% endif %}</td>
+        <td class="mono" style="font-size:.8rem">speed</td>
+        <td style="font-size:.8rem;color:#c9d1d9">Every case must have warm benchmark speed for Go and its comparison target.</td>
+      </tr>
+    </tbody>
+  </table>
+  {% if not validation_passed %}
+  <details style="margin-top:.5rem">
+    <summary style="color:#f85149;cursor:pointer;font-size:.85rem">Show violations ({{ n_violations }})</summary>
+    <table style="margin-top:.5rem">
+      <thead>
+        <tr><th>Fixture</th><th>Rule</th><th>Detail</th></tr>
+      </thead>
+      <tbody>
+        {% for v in violations %}
+        <tr>
+          <td class="mono" style="font-size:.75rem">{{ v.fixture }}</td>
+          <td class="mono" style="font-size:.75rem;color:#f85149">{{ v.rule }}</td>
+          <td class="mono" style="font-size:.75rem;color:#8b949e">{{ v.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+</div>
 
 </div>
 
@@ -201,7 +268,7 @@ function filt(f, btn) {
     if (f === 'all') r.classList.remove('fhide');
     else if (f === 'pass') r.classList.toggle('fhide', s !== 'pass');
     else if (f === 'fail') r.classList.toggle('fhide', s !== 'fail');
-    else if (f === 'skip') r.classList.toggle('fhide', !['both_skip','go_error','rust_error'].includes(s));
+    else if (f === 'error') r.classList.toggle('fhide', !['go_error','rust_error'].includes(s));
   });
   document.querySelectorAll('.detail-row').forEach(r => r.classList.add('hidden'));
 }

@@ -5,8 +5,8 @@
     <span style="color:#3fb950">&#10003;</span>
   {%- elif status == "fail" -%}
     <span style="color:#f85149">&#10007;</span>
-  {%- elif status in ("both_skip", "go_error", "rust_error") -%}
-    <span style="color:#8b949e">&#8212;</span>
+  {%- elif status in ("go_error", "rust_error") -%}
+    <span style="color:#f85149">&#9888;</span>
   {%- else -%}
     <span style="color:#8b949e">?</span>
   {%- endif -%}
@@ -57,7 +57,7 @@
 {% endmacro %}
 
 {#- Per-fixture result row -#}
-{% macro fixture_row(e) %}
+{% macro fixture_row(e, ncols) %}
 {%- set detail_id = e.fixture | replace(".", "_") -%}
 <tr class="fix-row toggle" data-status="{{ e.status }}" onclick="toggleDetail('{{ detail_id }}')">
   <td>{{ status_icon(e.status) }}</td>
@@ -75,11 +75,11 @@
   <td class="mono r">{{ fmt_ratio(e.go_warm_us, e.rust_warm_us) }}</td>
   <td class="mono r">{{ fmt_ratio(e.go_warm_us, e.python_warm_us) }}</td>
 </tr>
-{{ detail_row(e, detail_id) }}
+{{ detail_row(e, detail_id, ncols) }}
 {% endmacro %}
 
 {#- Expandable detail row -#}
-{% macro detail_row(e, detail_id) %}
+{% macro detail_row(e, detail_id, ncols) %}
 <tr class="detail-row hidden" id="detail_{{ detail_id }}"><td colspan="{{ ncols }}">
   <div class="detail-box">
     <div class="detail-meta">
@@ -110,7 +110,7 @@
 {% endmacro %}
 
 {#- Category header row -#}
-{% macro category_header(cat) %}
+{% macro category_header(cat, ncols) %}
 {%- set color = "#3fb950" if cat.n_pass == cat.n_total else "#f85149" -%}
 <tr class="cat-row">
   <td colspan="{{ ncols }}">

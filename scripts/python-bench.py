@@ -147,9 +147,37 @@ def run_fixture(fix: dict, raw_text: str = "") -> str:
         return "FAIL"
 
     if transform == "cache_aligner":
-        from headroom.transforms.cache_aligner import align_for_cache
-        _, hash_str = align_for_cache(inp)
-        return hash_str
+        from headroom.transforms.cache_aligner import CacheAligner, CacheAlignerConfig
+        from headroom.tokenizer import Tokenizer
+        from headroom.tokenizers.tiktoken_counter import TiktokenCounter
+        from headroom.utils import compute_short_hash
+        cfg = CacheAlignerConfig(**{k: v for k, v in config.items() if k in CacheAlignerConfig.__dataclass_fields__})
+        aligner = CacheAligner(cfg)
+        tokenizer_inst = Tokenizer(TiktokenCounter("gpt-4o"))
+        result = aligner.apply(inp, tokenizer_inst)
+        system_texts = [m.get("content", "") for m in inp if m.get("role") == "system" and isinstance(m.get("content"), str)]
+        bench_hash = compute_short_hash("\n---\n".join(system_texts))
+        cm = result.cache_metrics
+        out = {
+            "bench_hash": bench_hash,
+            "cache_metrics": {
+                "prefix_changed": cm.prefix_changed,
+                "previous_hash": cm.previous_hash,
+                "stable_prefix_bytes": cm.stable_prefix_bytes,
+                "stable_prefix_hash": cm.stable_prefix_hash,
+                "stable_prefix_tokens_est": cm.stable_prefix_tokens_est,
+            } if cm else {},
+            "diff_artifact": None,
+            "markers_inserted": result.markers_inserted,
+            "messages": result.messages,
+            "timing": result.timing,
+            "tokens_after": result.tokens_after,
+            "tokens_before": result.tokens_before,
+            "transforms_applied": result.transforms_applied,
+            "warnings": [],
+            "waste_signals": None,
+        }
+        return json.dumps(out, separators=(",", ":"), sort_keys=True)
 
     if transform == "search_compressor":
         from headroom.transforms.search_compressor import SearchCompressor

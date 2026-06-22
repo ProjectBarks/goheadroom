@@ -411,28 +411,16 @@ func (s *jsonScanner) parseArray() (*keyOrderNode, error) {
 		return node, nil
 	}
 
-	// Parse only the first element fully (to capture representative key order).
-	// Skip remaining elements since array items after crushing won't match
-	// original indices anyway, and homogeneous arrays share the same key order.
-	child, err := s.parseNode()
-	if err != nil {
-		return nil, err
-	}
-	node.items = append(node.items, child)
-	s.skipWhitespace()
-	if s.pos < len(s.data) && s.data[s.pos] == ']' {
-		s.pos++
-		return node, nil
-	}
-	if s.pos >= len(s.data) || s.data[s.pos] != ',' {
-		return nil, fmt.Errorf("expected ',' or ']' in array at pos %d", s.pos)
-	}
-	s.pos++
-
+	// Capture the key order of every element. Heterogeneous arrays (objects
+	// whose keys differ in order) must round-trip byte-identically with
+	// Python/Rust, which preserve each object's own insertion order. Reusing
+	// only the first element's order would mis-order later objects.
 	for {
-		if err := s.skipValue(); err != nil {
+		child, err := s.parseNode()
+		if err != nil {
 			return nil, err
 		}
+		node.items = append(node.items, child)
 		s.skipWhitespace()
 		if s.pos >= len(s.data) {
 			return nil, fmt.Errorf("unexpected end of JSON in array")
@@ -860,20 +848,27 @@ func writeOrderedMap(buf *bytes.Buffer, m map[string]interface{}, orderNode *key
 }
 
 // writeOrderedArray writes a slice as a JSON array, recursing into elements
-// with the corresponding order nodes. Since the scanner only stores a
-// representative (first) element's key order, all items reuse items[0].
+// with their corresponding per-element order nodes so that heterogeneous
+// objects keep their own key order (matching Python/Rust).
 func writeOrderedArray(buf *bytes.Buffer, arr []interface{}, orderNode *keyOrderNode) error {
 	buf.WriteByte('[')
-	// Use the first (representative) item's key order for all elements.
-	var repNode *keyOrderNode
-	if orderNode != nil && len(orderNode.items) > 0 {
-		repNode = orderNode.items[0]
+	var items []*keyOrderNode
+	if orderNode != nil {
+		items = orderNode.items
 	}
 	for i, item := range arr {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		if err := writeOrdered(buf, item, repNode); err != nil {
+		var elemNode *keyOrderNode
+		if i < len(items) {
+			elemNode = items[i]
+		} else if len(items) > 0 {
+			// More elements than recorded (e.g. after crushing): fall back to
+			// the last known order rather than dropping order entirely.
+			elemNode = items[len(items)-1]
+		}
+		if err := writeOrdered(buf, item, elemNode); err != nil {
 			return err
 		}
 	}
